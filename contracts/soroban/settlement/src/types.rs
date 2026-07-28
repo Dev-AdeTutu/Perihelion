@@ -43,6 +43,9 @@ pub enum DataKey {
     /// Keeper reward in stroops (Stellar's smallest unit) paid to callers of
     /// `cancel_expired_intent`. Incentivizes timely refund processing (issue #173).
     KeeperReward,
+    /// Configurable maximum TTL for TTL extensions (issue #340).
+    /// If unset, defaults to MAX_TTL_DEFAULT. Settable by admin.
+    MaxTtl,
 
     // Instance tier (value caps, issue #145).
     /// Maximum amount a single intent can register (0 = unlimited).

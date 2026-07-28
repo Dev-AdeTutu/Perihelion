@@ -1811,3 +1811,101 @@ fn cancel_succeeds_without_native_token_configured() {
     // Verify the intent was still cancelled
     assert!(client.is_cancelled(&h));
 }
+
+// --- Differential validation (issue #338) ------------------------------------
+
+#[test]
+fn fill_and_deliver_reject_identical_inputs_identically() {
+    // Verify that both fill_intent and deliver_intent share identical validation
+    // logic and reject the same invalid inputs with the same error variant.
+    // This is a regression test to prevent the two paths from diverging.
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.asset_admin.mint(&solver, &5_000_000);
+
+    // Test 1: expired intent
+    {
+        let h = hash(&s.env, 1001);
+        register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+        s.env.ledger().with_mut(|li| li.timestamp = 6_000); // past deadline
+
+        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
+        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
+
+        match (deliver_err, fill_err) {
+            (Err(e1), Err(e2)) => {
+                assert_eq!(
+                    format!("{:?}", e1),
+                    format!("{:?}", e2),
+                    "expired intent: deliver and fill should reject with same error"
+                );
+            }
+            _ => panic!("both should error on expired intent"),
+        }
+
+        s.env.ledger().with_mut(|li| li.timestamp = 1_000); // reset for next test
+    }
+
+    // Test 2: amount below minimum
+    {
+        let h = hash(&s.env, 1002);
+        register_intent(&s, &h, &recipient, 100_000, 5_000, 2, None);
+
+        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &50_000); // below 100_000
+        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &50_000, &0);
+
+        match (deliver_err, fill_err) {
+            (Err(e1), Err(e2)) => {
+                assert_eq!(
+                    format!("{:?}", e1),
+                    format!("{:?}", e2),
+                    "insufficient amount: deliver and fill should reject with same error"
+                );
+            }
+            _ => panic!("both should error on insufficient fill amount"),
+        }
+    }
+
+    // Test 3: already filled
+    {
+        let h = hash(&s.env, 1003);
+        register_intent(&s, &h, &recipient, 100_000, 5_000, 3, None);
+        s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
+
+        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
+        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
+
+        match (deliver_err, fill_err) {
+            (Err(e1), Err(e2)) => {
+                assert_eq!(
+                    format!("{:?}", e1),
+                    format!("{:?}", e2),
+                    "already filled: deliver and fill should reject with same error"
+                );
+            }
+            _ => panic!("both should error on already filled intent"),
+        }
+    }
+
+    // Test 4: invalid amount (zero)
+    {
+        let h = hash(&s.env, 1004);
+        register_intent(&s, &h, &recipient, 100_000, 5_000, 4, None);
+
+        let deliver_err = s.client.deliver_intent(&solver, &solver_evm, &h, &0);
+        let fill_err = s.client.fill_intent(&solver, &solver_evm, &h, &0, &0);
+
+        match (deliver_err, fill_err) {
+            (Err(e1), Err(e2)) => {
+                assert_eq!(
+                    format!("{:?}", e1),
+                    format!("{:?}", e2),
+                    "zero amount: deliver and fill should reject with same error"
+                );
+            }
+            _ => panic!("both should error on zero fill amount"),
+        }
+    }
+}
