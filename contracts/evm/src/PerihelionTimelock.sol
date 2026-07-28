@@ -51,6 +51,11 @@ contract PerihelionTimelock {
     mapping(bytes32 => Operation) public operations;
     mapping(bytes32 => mapping(address => bool)) public confirmedBy;
 
+    /// @notice Number of cancel-confirmations accumulated for each operation.
+    mapping(bytes32 => uint256) public cancelConfirmations;
+    /// @notice Whether a specific owner has submitted a cancel-confirmation for an operation.
+    mapping(bytes32 => mapping(address => bool)) public cancelConfirmedBy;
+
     uint256 private _reentrancy;
 
     // --- Events --------------------------------------------------------------
@@ -61,6 +66,7 @@ contract PerihelionTimelock {
     event Ready(bytes32 indexed id, uint256 readyAt);
     event Executed(bytes32 indexed id);
     event Cancelled(bytes32 indexed id);
+    event CancelConfirmed(bytes32 indexed id, address indexed owner, uint256 cancelConfirmations);
     event OwnerAdded(address indexed owner);
     event OwnerRemoved(address indexed owner);
     event ThresholdSet(uint256 threshold);
@@ -82,6 +88,7 @@ contract PerihelionTimelock {
     error CallFailed();
     error Reentrancy();
     error Expired();
+    error AlreadyCancelConfirmed();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -257,14 +264,41 @@ contract PerihelionTimelock {
         if (!ok) revert CallFailed();
     }
 
-    /// @notice Cancel a pending (un-executed) operation. Any owner may cancel.
+    /// @notice Submit a cancel-confirmation for a pending operation. Once
+    ///         `threshold` owners have called `cancel`, the operation is
+    ///         permanently deleted. This is symmetric with `confirm`/`execute`:
+    ///         the same M-of-N quorum required to *run* a proposal is required
+    ///         to *kill* it, preventing a single compromised key from
+    ///         unilaterally blocking all governance (issue #282 / #44).
+    ///
+    /// @dev Cancel-confirmations are tracked independently of exec-confirmations.
+    ///      An owner may confirm an op (signalling intent to execute) and also
+    ///      cancel-confirm it (signalling intent to abort) — only the cancel
+    ///      path's threshold check governs deletion. Calling `cancel` when the
+    ///      operation has already been executed reverts with `AlreadyExecuted`.
+    ///      The cancel-confirmation state for an operation is cleaned up
+    ///      atomically when threshold is reached and the operation is deleted.
+    ///
     /// @param id Operation id to cancel.
     function cancel(bytes32 id) external onlyOwner {
         Operation storage op = operations[id];
         if (!op.exists) revert UnknownOperation();
         if (op.executed) revert AlreadyExecuted();
-        delete operations[id];
-        emit Cancelled(id);
+        if (cancelConfirmedBy[id][msg.sender]) revert AlreadyCancelConfirmed();
+
+        cancelConfirmedBy[id][msg.sender] = true;
+        uint256 count = cancelConfirmations[id] + 1;
+        cancelConfirmations[id] = count;
+        emit CancelConfirmed(id, msg.sender, count);
+
+        if (count >= threshold) {
+            // Threshold reached: delete the operation and its cancel state.
+            delete operations[id];
+            delete cancelConfirmations[id];
+            // Individual cancelConfirmedBy entries are left as-is; they cannot
+            // be re-used because the operation slot no longer exists.
+            emit Cancelled(id);
+        }
     }
 
     // --- Self-administered configuration -------------------------------------

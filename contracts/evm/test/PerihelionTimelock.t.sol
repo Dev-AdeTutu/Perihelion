@@ -268,51 +268,98 @@ contract PerihelionTimelockTest is Test {
 
     // --- Cancellation policy ---------------------------------------------------
     //
-    // Deliberate choice (documented in SECURITY.md / TECHNICAL-ARCHITECTURE.md
-    // §6.1 T10): cancellation stays 1-of-N. Any single owner — not just the
-    // proposer or a threshold — may cancel a pending (un-executed) operation.
-    // This is a cheap liveness valve (anyone can clear a stuck or contested op
-    // without needing to assemble the same threshold that confirms), at the
-    // acknowledged cost that one dissenting owner can repeatedly cancel
-    // operations a majority supports, stalling that specific action (not the
-    // multisig's ability to act in general — re-proposing is equally cheap).
-    // Symmetric (threshold-to-cancel) and proposer-only alternatives were
-    // considered and rejected for now: both reduce the cancel path's
-    // liveness without removing the underlying need for owners to coordinate
-    // on what should run, which is a process/governance concern, not a
-    // contract one.
+    // Cancellation is symmetric with execution (issue #282 / #44): the same
+    // M-of-N threshold required to execute a proposal is required to cancel it.
+    // Each owner calls cancel(id) to submit a cancel-confirmation; once
+    // `threshold` cancel-confirmations accumulate the operation is deleted and
+    // Cancelled is emitted.
+    //
+    // This prevents a single compromised owner key from blocking governance
+    // indefinitely by repeatedly cancelling proposals before they can execute.
+    // An owner who merely disagrees with a proposal should use
+    // revokeConfirmation, which already provides the single-owner "I withdraw
+    // my support" primitive without giving veto power to any individual.
 
-    function test_Cancel() public {
+    /// @notice threshold - 1 cancel calls leave the operation intact.
+    function test_Cancel_BelowThreshold_OperationIntact() public {
         vm.prank(a);
         bytes32 id = tl.propose(address(target), 0, _setValueData(1), SALT);
+
+        // In a 2-of-3 setup, one cancel-confirmation is below threshold.
         vm.prank(b);
         tl.cancel(id);
+
+        // Operation must still exist.
         (,,, bool exists) = tl.operations(id);
-        assertFalse(exists);
+        assertTrue(exists, "operation must survive a single cancel below threshold");
+        assertEq(tl.cancelConfirmations(id), 1);
+        assertTrue(tl.cancelConfirmedBy(id, b));
     }
 
-    /// @notice Pins the deliberate 1-of-N policy: a single non-proposing
-    ///         owner can unilaterally cancel, even one who never confirmed.
-    function test_Cancel_BySingleNonProposingOwner_Succeeds() public {
+    /// @notice The threshold-th cancel call deletes the operation.
+    function test_Cancel_AtThreshold_DeletesOperation() public {
         vm.prank(a);
         bytes32 id = tl.propose(address(target), 0, _setValueData(2), SALT);
-        // c never confirmed this op, yet a single owner suffices to cancel.
-        vm.prank(c);
+
+        vm.prank(a);
         tl.cancel(id);
         (,,, bool exists) = tl.operations(id);
-        assertFalse(exists);
+        assertTrue(exists, "still alive after first cancel");
+
+        // Second cancel hits threshold (2-of-3).
+        vm.prank(b);
+        vm.expectEmit(true, false, false, false);
+        emit PerihelionTimelock.Cancelled(id);
+        tl.cancel(id);
+
+        (,,, exists) = tl.operations(id);
+        assertFalse(exists, "operation must be deleted after threshold cancel");
+        // Cancel state cleaned up.
+        assertEq(tl.cancelConfirmations(id), 0);
     }
 
+    /// @notice AC: a single owner cannot cancel an operation that has reached
+    ///         execution threshold (was at or above exec threshold).
+    function test_Cancel_SingleOwnerCannotVetoThresholdReachedOp() public {
+        bytes memory data = _setValueData(3);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id); // threshold reached, readyAt set
+
+        // One cancel-confirmation is not enough to kill it.
+        vm.prank(c);
+        tl.cancel(id);
+
+        (,,, bool exists) = tl.operations(id);
+        assertTrue(exists, "a single cancel must not remove a threshold-reached operation");
+    }
+
+    /// @notice AC: a single non-proposing owner cannot unilaterally cancel.
+    function test_Cancel_SingleNonProposingOwnerCannotCancel() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(4), SALT);
+
+        // c never confirmed; still only 1 cancel-confirmation — not enough.
+        vm.prank(c);
+        tl.cancel(id);
+
+        (,,, bool exists) = tl.operations(id);
+        assertTrue(exists, "single non-proposing owner must not unilaterally cancel");
+    }
+
+    /// @notice Non-owner cannot submit a cancel-confirmation.
     function test_RevertWhen_NonOwnerCancels() public {
         vm.prank(a);
-        bytes32 id = tl.propose(address(target), 0, _setValueData(3), SALT);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(5), SALT);
         vm.prank(stranger);
         vm.expectRevert(PerihelionTimelock.NotOwner.selector);
         tl.cancel(id);
     }
 
+    /// @notice Cancel of an already-executed operation reverts.
     function test_RevertWhen_CancelExecuted() public {
-        bytes memory data = _setValueData(4);
+        bytes memory data = _setValueData(6);
         bytes32 id = tl.hashOperation(address(target), 0, data, SALT);
         vm.prank(a);
         tl.propose(address(target), 0, data, SALT);
@@ -326,6 +373,76 @@ contract PerihelionTimelockTest is Test {
         vm.expectRevert(PerihelionTimelock.AlreadyExecuted.selector);
         tl.cancel(id);
     }
+
+    /// @notice Cancel of a non-existent operation reverts.
+    function test_RevertWhen_CancelUnknown() public {
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.UnknownOperation.selector);
+        tl.cancel(bytes32(uint256(0xDEAD)));
+    }
+
+    /// @notice An owner cannot submit duplicate cancel-confirmations.
+    function test_RevertWhen_DuplicateCancelConfirmation() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(7), SALT);
+
+        vm.prank(b);
+        tl.cancel(id);
+
+        vm.prank(b);
+        vm.expectRevert(PerihelionTimelock.AlreadyCancelConfirmed.selector);
+        tl.cancel(id);
+    }
+
+    /// @notice CancelConfirmed event is emitted on each cancel call.
+    function test_CancelConfirmed_EventEmitted() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(8), SALT);
+
+        vm.prank(b);
+        vm.expectEmit(true, true, false, true);
+        emit PerihelionTimelock.CancelConfirmed(id, b, 1);
+        tl.cancel(id);
+    }
+
+    /// @notice All three owners cancelling a 2-of-3 op: threshold hit on
+    ///         second call; third call reverts UnknownOperation (op is gone).
+    function test_Cancel_ThirdCallAfterDeletion_Reverts() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(9), SALT);
+
+        vm.prank(a);
+        tl.cancel(id); // 1st — below threshold
+
+        vm.prank(b);
+        tl.cancel(id); // 2nd — threshold reached, op deleted
+
+        // Op is gone; c's cancel must revert UnknownOperation.
+        vm.prank(c);
+        vm.expectRevert(PerihelionTimelock.UnknownOperation.selector);
+        tl.cancel(id);
+    }
+
+    /// @notice Confirm + cancel-confirm by the same owner is valid: they are
+    ///         independent paths. An owner who already confirmed an op may also
+    ///         vote to cancel it.
+    function test_Cancel_OwnerCanBothConfirmAndCancelConfirm() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(10), SALT);
+        vm.prank(b);
+        tl.confirm(id); // exec-confirm from b
+
+        // a and b both cancel-confirm; threshold (2) is met on b's cancel.
+        vm.prank(a);
+        tl.cancel(id);
+        vm.prank(b);
+        tl.cancel(id); // deletion
+
+        (,,, bool exists) = tl.operations(id);
+        assertFalse(exists);
+    }
+
+
 
     // --- Self-administered config -------------------------------------------
 
