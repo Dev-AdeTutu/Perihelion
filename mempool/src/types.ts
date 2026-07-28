@@ -7,5 +7,5 @@ export interface MempoolIntentRecord {
   intent: Intent;
   signature: Hex;
   status: IntentStatus;
-  submittedAt: number;
+  createdAt: number;
 }

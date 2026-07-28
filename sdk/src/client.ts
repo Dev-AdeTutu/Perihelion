@@ -107,6 +107,25 @@ export class PerihelionClient {
     return signed.hash;
   }
 
+  /**
+   * Report a status transition for an intent (e.g. `"claimed"`, `"settled"`).
+   * Restricted server-side to holders of the mempool's shared status token —
+   * intended for relayer/solver services, not end users.
+   */
+  async reportStatus(hash: Hex, status: IntentStatus, statusToken: string): Promise<void> {
+    const res = await this.fetchWithTimeout(`${this.base}/intents/${hash}/status`, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${statusToken}`,
+      },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) {
+      throw new PerihelionHttpError("reportStatus", res.status, await res.text());
+    }
+  }
+
   /** Fetch the current record for an intent by its hash. */
   async getIntent(hash: Hex, signal?: AbortSignal): Promise<IntentRecord> {
     const res = await this.fetchWithRetry(`${this.base}/intents/${hash}`, {}, signal);
