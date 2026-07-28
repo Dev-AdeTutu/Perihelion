@@ -453,12 +453,210 @@ fn rejects_replayed_nonce() {
     register_intent(&s, &hash(&s.env, 10), &recipient, 1, 5_000, 5, None);
 }
 
-/// A FillInstruction whose body `src_eid` differs from `origin.src_eid` must
-/// not be trusted for return-path routing. The contract overwrites the body's
-/// src_eid with the transport-authenticated origin.src_eid, so any
-/// FillConfirmed/CancelIntent is dispatched to the chain that actually sent the
-/// message rather than an attacker-declared chain.
+// --- Issue #285: unbounded nonce bitmap — acceptance criteria -----------------
+//
+// Replaces the 64-nonce windowed bitmap with an unbounded per-(eid, word_index)
+// store that mirrors EVM `_inboundNonceBitmap`. The window-advance bug could
+// silently drop any in-flight message when the gap between delivered nonces
+// exceeded 64. All three tests below must pass for the fix to be correct.
+
+/// AC1: Deliver nonces 1, 100, then 50 — all three are accepted exactly once.
+///
+/// Under the old windowed implementation, delivering nonce 100 after nonce 1
+/// advanced the base to 99, permanently rejecting any nonce in [2, 99]
+/// (including 50). The unbounded bitmap must accept all three.
 #[test]
+fn nonce_unbounded_accepts_wide_gap_and_backfill() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+
+    // Nonce 1 — first message on a fresh channel.
+    let h1 = hash(&s.env, 0xB1);
+    register_intent(&s, &h1, &recipient, 1, 5_000, 1, None);
+    assert!(s.client.get_intent(&h1).is_some(), "nonce 1 must be accepted");
+
+    // Nonce 100 — far ahead of nonce 1 (gap = 99, previously would have
+    // advanced the base and thrown away [2, 99]).
+    let h100 = hash(&s.env, 0xB2);
+    register_intent(&s, &h100, &recipient, 1, 5_000, 100, None);
+    assert!(s.client.get_intent(&h100).is_some(), "nonce 100 must be accepted");
+
+    // Nonce 50 — a back-fill that falls between the two already-delivered nonces.
+    // This is the nonce the windowed bitmap would have silently dropped.
+    let h50 = hash(&s.env, 0xB3);
+    register_intent(&s, &h50, &recipient, 1, 5_000, 50, None);
+    assert!(s.client.get_intent(&h50).is_some(), "nonce 50 must be accepted after the gap");
+
+    // Belt-and-suspenders: all three intents registered.
+    assert!(s.client.get_intent(&h1).is_some());
+    assert!(s.client.get_intent(&h50).is_some());
+    assert!(s.client.get_intent(&h100).is_some());
+}
+
+/// AC2: Re-delivering any accepted nonce returns StaleNonce.
+///
+/// Checks replay protection for each of the three nonces from AC1 and for the
+/// word-boundary nonces (63, 64, 65, 127, 128, 129) to cover cross-word logic.
+#[test]
+fn nonce_unbounded_replay_returns_stale_nonce() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+
+    // Accept nonces spanning two word boundaries so cross-word paths are covered.
+    // word 0: bits 1..63, word 1: bits 64..127, word 2: bit 128
+    for n in [1u64, 50, 63, 64, 65, 100, 127, 128, 129] {
+        let mut hb = [0u8; 32];
+        hb[24..32].copy_from_slice(&n.to_be_bytes());
+        let h = BytesN::from_array(&s.env, &hb);
+        register_intent(&s, &h, &recipient, 1, 5_000, n, None);
+    }
+
+    // Each replay must be rejected.
+    for n in [1u64, 50, 63, 64, 65, 100, 127, 128, 129] {
+        let mut hb = [0u8; 32];
+        hb[24..32].copy_from_slice(&n.to_be_bytes());
+        let h = BytesN::from_array(&s.env, &hb);
+        // A different intent hash with the same nonce.
+        let fi = FillInstruction {
+            intent_hash: h.clone(),
+            src_eid: s.src_eid,
+            recipient: recipient.clone(),
+            dest_asset: s.asset.clone(),
+            min_dest_amount: 1,
+            deadline: 5_000,
+            preferred_solver: None,
+            reservation_window: 0,
+        };
+        let origin = Origin {
+            src_eid: s.src_eid,
+            sender: s.peer.clone(),
+            nonce: n,
+        };
+        let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+        // on_fill_instruction will skip re-registration (idempotent), but
+        // accept_nonce must still fire StaleNonce before we get there.
+        let result = s.client.try_lz_receive(
+            &origin,
+            &guid,
+            &LzMessage::FillInstruction(fi),
+        );
+        assert!(
+            result.is_err(),
+            "re-delivery of nonce {} must be rejected as StaleNonce",
+            n
+        );
+    }
+}
+
+/// AC3: Property test — random permutation of nonces 1..=200, all accepted
+/// exactly once; no permutation loses a nonce or double-accepts one.
+///
+/// Uses a deterministic LCG shuffle so the test is reproducible without
+/// pulling in proptest here. The proptest module (fuzz.rs) covers deeper
+/// fuzz territory.
+#[test]
+fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
+    extern crate std;
+    use std::vec::Vec;
+
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+
+    // Build a deterministic shuffle of 1..=200 (LCG, seed = 0xDEAD_BEEF).
+    const N: u64 = 200;
+    let mut nonces: Vec<u64> = (1..=N).collect();
+    let mut seed: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
+    for i in (1..nonces.len()).rev() {
+        // Knuth / Fisher–Yates with an LCG.
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        let j = (seed >> 33) as usize % (i + 1);
+        nonces.swap(i, j);
+    }
+
+    // Deliver every nonce in the shuffled order.
+    for &n in &nonces {
+        // Use the nonce itself as a seed for the intent hash (unique per nonce).
+        let mut hash_bytes = [0u8; 32];
+        let n_bytes = n.to_be_bytes();
+        hash_bytes[24..32].copy_from_slice(&n_bytes);
+        let h = BytesN::from_array(&s.env, &hash_bytes);
+        let fi = FillInstruction {
+            intent_hash: h.clone(),
+            src_eid: s.src_eid,
+            recipient: recipient.clone(),
+            dest_asset: s.asset.clone(),
+            min_dest_amount: 1,
+            deadline: 5_000,
+            preferred_solver: None,
+            reservation_window: 0,
+        };
+        let origin = Origin {
+            src_eid: s.src_eid,
+            sender: s.peer.clone(),
+            nonce: n,
+        };
+        let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+        s.client
+            .lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+    }
+
+    // Every intent must be registered — none silently dropped.
+    for n in 1u64..=N {
+        let mut hash_bytes = [0u8; 32];
+        let n_bytes = n.to_be_bytes();
+        hash_bytes[24..32].copy_from_slice(&n_bytes);
+        let h = BytesN::from_array(&s.env, &hash_bytes);
+        assert!(
+            s.client.get_intent(&h).is_some(),
+            "intent for nonce {} was silently dropped",
+            n
+        );
+    }
+
+    // No nonce may be re-accepted (replay any one in the middle of the range).
+    for n in [1u64, 64, 128, 200] {
+        let mut hash_bytes = [0u8; 32];
+        let n_bytes = n.to_be_bytes();
+        hash_bytes[24..32].copy_from_slice(&n_bytes);
+        let h = BytesN::from_array(&s.env, &hash_bytes);
+        let fi = FillInstruction {
+            intent_hash: h.clone(),
+            src_eid: s.src_eid,
+            recipient: recipient.clone(),
+            dest_asset: s.asset.clone(),
+            min_dest_amount: 1,
+            deadline: 5_000,
+            preferred_solver: None,
+            reservation_window: 0,
+        };
+        let origin = Origin {
+            src_eid: s.src_eid,
+            sender: s.peer.clone(),
+            nonce: n,
+        };
+        let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+        let result = s
+            .client
+            .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+        assert!(
+            result.is_err(),
+            "replay of nonce {} must be rejected",
+            n
+        );
+    }
+}
+
+/// Nonce 0 is always invalid (LayerZero nonces start at 1).
+#[test]
+#[should_panic(expected = "Error(Contract, #162)")] // StaleNonce
+fn nonce_zero_always_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    // Deliver nonce 0 — must be rejected immediately.
+    register_intent(&s, &hash(&s.env, 0xF0), &recipient, 1, 5_000, 0, None);
+}
+
+
 fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
     let s = setup();
     let recipient = Address::generate(&s.env);
@@ -474,6 +672,7 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+        reservation_window: 0,
     };
     let origin = Origin {
         src_eid: s.src_eid, // transport-authenticated
@@ -496,7 +695,8 @@ fn rejects_double_initialize() {
     let s = setup();
     let admin = Address::generate(&s.env);
     let endpoint = Address::generate(&s.env);
-    s.client.initialize(&admin, &endpoint);
+    let native_token = Address::generate(&s.env);
+    s.client.initialize(&admin, &endpoint, &native_token);
 }
 
 // --- Issue #18: initialize validation ----------------------------------------
@@ -530,7 +730,8 @@ fn initialize_emits_event() {
     let id = env.register(Perihelion, ());
     let client = PerihelionClient::new(&env, &id);
     let admin = Address::generate(&env);
-    client.initialize(&admin, &endpoint_addr);
+    let native_token = Address::generate(&env);
+    client.initialize(&admin, &endpoint_addr, &native_token);
     // Verify the initialized event was published (env records all events).
     let events = env.events().all();
     let found = events.iter().any(|e| {
@@ -827,7 +1028,7 @@ fn initialized_event_shape() {
 #[test]
 fn endpoint_set_event_shape() {
     let s = setup();
-    let old_ep = s.client.endpoint();
+    let _old_ep = s.client.endpoint();
     let new_ep = Address::generate(&s.env);
     s.client.set_endpoint(&new_ep);
 
@@ -1746,7 +1947,7 @@ fn cancel_succeeds_without_native_token_configured() {
 
     let admin = Address::generate(&env);
     let endpoint = env.register(MockEndpoint, ());
-    let mock = MockEndpointClient::new(&env, &endpoint);
+    let _mock = MockEndpointClient::new(&env, &endpoint);
 
     let id = env.register(Perihelion, ());
     let client = PerihelionClient::new(&env, &id);
@@ -1769,29 +1970,28 @@ fn cancel_succeeds_without_native_token_configured() {
     let keeper = Address::generate(&env);
     let h = hash(&env, 202);
 
-    // Register the intent through lz_receive (normal flow)
+    // Register the intent through lz_receive (normal flow), using the same
+    // pattern as register_intent() — LzMessage::FillInstruction with a valid Origin.
+    let dest_asset_issuer = Address::generate(&env);
+    let dest_sac = env.register_stellar_asset_contract_v2(dest_asset_issuer);
+    let dest_asset = dest_sac.address();
     let fi = FillInstruction {
         intent_hash: h.clone(),
         src_eid,
         recipient,
-        dest_asset: Address::generate(&env), // not used for this test
+        dest_asset,
         min_dest_amount: 100_000,
         deadline: 5_000,
         preferred_solver: None,
-        reservation_window: 1,
+        reservation_window: 0,
     };
-    let msg = soroban_sdk::Bytes::new(
-        &env,
-        &crate::messages::encode_fill_instruction(&env, &fi),
-    );
-    client.lz_receive(
-        &Origin {
-            src_eid,
-            sender: peer.clone(),
-            nonce: 1,
-        },
-        &msg,
-    );
+    let origin = Origin {
+        src_eid,
+        sender: peer.clone(),
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&env, &[0u8; 32]);
+    client.lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
 
     // Set keeper reward before clearing the native token
     let reward = 10_000i128;

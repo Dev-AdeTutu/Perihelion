@@ -74,19 +74,36 @@ pub enum DataKey {
     // Persistent tier (transport bookkeeping).
     /// Aggregate reputation metrics for a solver, keyed by solver address.
     SolverReputation(Address),
-    /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
-    /// Tracks which nonces have been processed. The bitmap covers nonces in
-    /// the range [base, base + 63] where base is stored separately.
+    /// Unbounded per-(eid, word_index) nonce bitmap for unordered delivery
+    /// (issue #285). Mirrors the EVM `_inboundNonceBitmap[srcEid][wordIndex]`
+    /// layout exactly.
+    ///
+    /// A nonce `n` is tracked at:
+    ///   word_index = n / 64
+    ///   bit_index  = n % 64
+    ///
+    /// Each storage word covers 64 consecutive nonces. Words are written
+    /// lazily on first use and are never discarded, so nonces from any
+    /// message-in-flight window are always accepted exactly once regardless
+    /// of delivery order.
     ///
     /// This is the per-eid **LayerZero transport nonce** state — distinct from
     /// `Intent.nonce` (a 256-bit random collision-prevention field in the
     /// EIP-712 payload). See `docs/TECHNICAL-ARCHITECTURE.md §11`.
+    ///
+    /// REPLAY-SAFETY: archival of an `InboundNonceWord` entry re-opens the 64
+    /// nonces it covered. TTL is extended to MAX_TTL on every write; see
+    /// `accept_nonce` in lib.rs.
+    InboundNonceWord(u32, u64),
+    /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
+    /// **Deprecated** — superseded by `InboundNonceWord(eid, word_index)` (issue #285).
+    /// Kept to avoid breaking any archived storage entries; never written by
+    /// `accept_nonce` after this change.
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap window (implicit 0 before first message).
-    ///
-    /// REPLAY-SAFETY: archival of this entry resets the base to zero, allowing
-    /// re-acceptance of any nonce below the previous high-water mark. TTL must
-    /// be extended to MAX_TTL on every write; see accept_nonce in lib.rs.
+    /// **Deprecated** — superseded by `InboundNonceWord(eid, word_index)` (issue #285).
+    /// Kept to avoid breaking any archived storage entries; never written by
+    /// `accept_nonce` after this change.
     InboundNonceBase(u32),
 }
 

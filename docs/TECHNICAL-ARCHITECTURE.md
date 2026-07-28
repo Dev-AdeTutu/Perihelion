@@ -2176,23 +2176,42 @@ not by the nonce.
 
 **Where:** `Origin.nonce` (uint64, per source endpoint id), delivered to
 `lzReceive` by the LayerZero endpoint. Tracked by:
-- `inboundNonce[srcEid]` (EVM, high-water mark), in `PerihelionEscrow.sol`
-- `InboundNonceBitmap(eid)` + `InboundNonceBase(eid)` (Soroban, 64-nonce
-  bitmap window), in `contracts/soroban/settlement/src/lib.rs` → `accept_nonce`.
+- `_inboundNonceBitmap[srcEid][wordIndex]` (EVM, unbounded per-word bitmap),
+  in `PerihelionEscrow.sol` → `_isNonceConsumed` / `_consumeNonce`.
+- `InboundNonceWord(eid, word_index)` (Soroban, unbounded per-word bitmap),
+  in `contracts/soroban/settlement/src/lib.rs` → `accept_nonce`.
+
+Both implementations use **identical semantics** (issue #285):
+
+```
+word_index = nonce / 64   (Soroban word covers 64 nonces; EVM uses 256)
+bit_index  = nonce % 64
+```
+
+Each storage word is created lazily on first use and **never discarded**.
+There is no sliding window, no base-advance, and no maximum gap between
+deliverable nonces. A message with nonce `n` is accepted if and only if
+bit `n % 64` of word `n / 64` is not yet set; then that bit is atomically
+set and the entry's TTL is extended to `MAX_TTL`.
+
+> **Why Soroban uses 64 bits per word while EVM uses 256:** Soroban's
+> persistent storage type system stores `u64` natively; `u256` requires an
+> extra encoding step. Using 64-bit words keeps the implementation simple
+> and still gives one storage entry per 64 nonces — negligible rent for any
+> realistic traffic volume.
 
 **What it protects against:** _LayerZero message replay._ LayerZero V2 uses
 lazy-nonce ordering: each source endpoint id has a monotonically increasing
 per-`(src_eid, dst_eid, receiver)` nonce. If the same LayerZero message were
 delivered twice (either by a buggy DVN or a deliberate replay attack), the
-second delivery would have the same `origin.nonce` as the first, which is now
-≤ the stored high-water mark (EVM) or already set in the bitmap (Soroban). The
-second delivery is rejected with `StaleNonce`.
+second delivery would have the same `origin.nonce` as the first, whose bit is
+now set. The second delivery is rejected with `StaleNonce`.
 
-The EVM uses a strict high-water mark (ordered delivery): any nonce ≤
-`inboundNonce[srcEid]` is rejected. The Soroban contract uses a 64-nonce
-bitmap (unordered delivery): nonces within a 64-message window may arrive in
-any order; each is accepted exactly once, and nonces that fall outside the
-window (older than 64 messages) are rejected as stale.
+**Unordered delivery:** Nonces from the same source endpoint may arrive in any
+order. A burst of 65+ concurrent messages with widely-separated nonces is
+handled correctly — there is no "window" that can be advanced to drop pending
+messages. This is the key fix over the prior 64-nonce windowed implementation
+(issue #285).
 
 **What it does NOT protect against:** the intent hash collision problem (two
 different intents that happen to have the same hash). That is prevented by the
@@ -2200,7 +2219,7 @@ intent nonce (§11.1). Nor does the transport nonce prevent the same intent from
 being locked twice — that is the job of the `locks` mapping and the idempotency
 markers (§11.3).
 
-**Reference:** `PerihelionEscrow.sol` → `lzReceive` (`inboundNonce` check),
+**Reference:** `PerihelionEscrow.sol` → `_isNonceConsumed` / `_consumeNonce`,
 `lib.rs` → `lz_receive` + `accept_nonce`.
 
 ---

@@ -485,14 +485,15 @@ fn inbound_nonce_archival_resets_replay_protection() {
     let h2 = hash(&s.env, 112);
     register_intent(&s, &h2, &recipient, 100_000, 5_000, 2, None);
     
-    // At this point, InboundNonceBase and InboundNonceBitmap are set and have TTL = MAX_TTL
+    // At this point, InboundNonceWord(eid, 0) is set and has TTL = MAX_TTL.
+    // (issue #285: nonces 1 and 2 both land in word_index = 1/64 = 0.)
     
     // Advance far past MAX_TTL (simulating archive of nonce tracking)
     // MAX_TTL = 3_110_400 ledgers
     // This is unrealistic in practice (years of time), but documents the behavior
     advance_ledger(&s.env, 3_150_000);
     
-    // If the InboundNonceBase/Bitmap entries were archived and restored to zero,
+    // If the InboundNonceWord entries were archived and restored to zero,
     // a nonce that was previously consumed (e.g., nonce 1) could be re-accepted.
     // This is the replay-safety edge case noted in types.rs comments.
     
