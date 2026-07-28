@@ -105,7 +105,7 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         if (openHashes.length == 0) return;
         uint256 idx = bound(idxSeed, 0, openHashes.length - 1);
         bytes32 h = openHashes[idx];
-        (address solver,,, uint256 amount,,,) = escrow.locks(h);
+        (address solver,,, uint256 amount,,,,) = escrow.locks(h);
 
         lzNonce++;
         bytes memory message = abi.encodePacked(
@@ -121,7 +121,7 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         if (openHashes.length == 0) return;
         uint256 idx = bound(idxSeed, 0, openHashes.length - 1);
         bytes32 h = openHashes[idx];
-        (,,, uint256 amount,,,) = escrow.locks(h);
+        (,,, uint256 amount,,,,) = escrow.locks(h);
 
         lzNonce++;
         bytes memory message = abi.encodePacked(V, T_CANCEL_INTENT, h, uint8(0));
@@ -135,9 +135,9 @@ contract EscrowHandler is CommonBase, StdCheats, StdUtils {
         if (openHashes.length == 0) return;
         uint256 idx = bound(idxSeed, 0, openHashes.length - 1);
         bytes32 h = openHashes[idx];
-        (,,, uint256 amount, uint256 deadline,,) = escrow.locks(h);
+        (,,, uint256 amount,, uint64 deadline,,) = escrow.locks(h);
 
-        uint256 opensAt = deadline + escrow.confirmationGrace();
+        uint256 opensAt = uint256(deadline) + escrow.confirmationGrace();
         // Jump to a point at or beyond the refund window for this lock.
         vm.warp(bound(warpSeed, opensAt, opensAt + 30 days));
         escrow.cancelExpired(h);
@@ -169,6 +169,8 @@ contract PerihelionEscrowInvariantTest is Test {
         vm.prank(handler.user());
         token.approve(address(escrow), type(uint256).max);
 
+        escrow.setAssetAllowed(address(token), true);
+
         targetContract(address(handler));
     }
 
@@ -192,7 +194,7 @@ contract PerihelionEscrowInvariantTest is Test {
         uint256 n = handler.everCount();
         for (uint256 i = 0; i < n; i++) {
             bytes32 h = handler.everHashAt(i);
-            (,,,,, bool released, bool refunded) = escrow.locks(h);
+            (,,,,,, bool released, bool refunded) = escrow.locks(h);
             assertFalse(released && refunded);
         }
     }
