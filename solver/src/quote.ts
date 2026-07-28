@@ -65,9 +65,10 @@ export const defaultDecimalsLookup: DecimalsLookup = (assetId: string): number =
   if (KNOWN_DECIMALS[assetId] !== undefined) return KNOWN_DECIMALS[assetId];
   // Stellar issued asset: "CODE:ISSUER" uses 7dp.
   if (assetId.includes(":")) return 7;
-  // EVM token address (0x...): 6dp is the stablecoin convention on the
-  // documented corridor. Operators must supply a DecimalsLookup for 18dp tokens.
-  if (assetId.startsWith("0x")) return 6;
+  // EVM token address (0x...): decimals vary by token (6dp stablecoins, 18dp
+  // WETH/DAI, etc.) and cannot be guessed safely — mispricing here moves real
+  // money. Callers must supply a DecimalsLookup (e.g. an on-chain
+  // erc20.decimals() reader) for EVM assets.
   throw new Error(
     `[Perihelion] decimals not configured for asset "${assetId}". ` +
     `Provide a DecimalsLookup that returns the correct precision.`,
@@ -213,6 +214,20 @@ export async function evaluate(
     return { fill: false, reason: "fee-inclusive profit is non-positive", terminal: false };
   }
   const profitBps = Number((profit * 10_000n) / proceeds);
+
+  // ── sanity bound ──────────────────────────────────────────────────────────
+  // A stablecoin corridor should never yield >10% profit; a figure this large
+  // is far more likely to be a decimals/pricing misconfiguration than a real
+  // opportunity, so refuse to fill rather than risk a catastrophic mis-quote.
+  const MAX_PLAUSIBLE_PROFIT_BPS = 1000;
+  if (profitBps > MAX_PLAUSIBLE_PROFIT_BPS) {
+    return {
+      fill: false,
+      reason: `implausible profit ${profitBps}bps exceeds sanity bound ${MAX_PLAUSIBLE_PROFIT_BPS}bps — check decimals/pricing config`,
+      terminal: false,
+      profitBps,
+    };
+  }
 
   // ── inventory check ───────────────────────────────────────────────────────
   // Use the caller-supplied provider if it exposes a balance, else unlimited.

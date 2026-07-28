@@ -101,7 +101,13 @@ For production use, you likely need to customize:
    - Integrate external DEX pricing (e.g., CoinGecko, Uniswap, 1inch)
    - Account for your own inventory levels and risk
 
-2. **Executor configuration** — Wire real settlement legs:
+2. **`quote.ts:defaultDecimalsLookup()`** — This throws for any EVM token
+   address it doesn't recognize (it will never guess a token's decimals, since
+   guessing wrong misprices by orders of magnitude). Supply a `DecimalsLookup`
+   covering every EVM asset you support, e.g. an on-chain `erc20.decimals()`
+   reader, before running against real capital. See [docs/assets.md](../docs/assets.md).
+
+3. **Executor configuration** — Wire real settlement legs:
    - Ensure your EVM account can sign transactions on the source chain
    - Verify Stellar keypair has funds for transaction fees
    - Test the integration against a testnet first (see [Deployment & Operations](./deployment.md))
