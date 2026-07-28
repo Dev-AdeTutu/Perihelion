@@ -1465,4 +1465,85 @@ contract PerihelionEscrowTest is Test {
         uint256 gasUsed = g - gasleft();
         assertLt(gasUsed, 750_000); // sanity ceiling; exact per-call saving in .gas-snapshot
     }
+
+    // --- Issue #273: totalLocked / skim surplus bound ------------------------
+
+    /// totalLocked is incremented by lock() and tracks exactly what was received.
+    function test_TotalLocked_IncrementedOnLock() public {
+        assertEq(escrow.totalLocked(address(token)), 0);
+        bytes32 h = _lock();
+        (,,, uint256 amount,,,) = escrow.locks(h);
+        assertEq(escrow.totalLocked(address(token)), amount);
+    }
+
+    /// totalLocked is decremented when a fill is confirmed (release path).
+    function test_TotalLocked_DecrementedOnRelease() public {
+        bytes32 h = _lock();
+        (,,, uint256 amount,,,) = escrow.locks(h);
+
+        _confirm(h, solver, 1);
+
+        assertEq(escrow.totalLocked(address(token)), 0);
+        assertEq(token.balanceOf(solver), amount);
+    }
+
+    /// totalLocked is decremented when a cancel arrives from Stellar.
+    function test_TotalLocked_DecrementedOnCancelInbound() public {
+        bytes32 h = _lock();
+
+        _cancel(h, 1);
+
+        assertEq(escrow.totalLocked(address(token)), 0);
+    }
+
+    /// totalLocked is decremented when cancelExpired fires.
+    function test_TotalLocked_DecrementedOnCancelExpired() public {
+        bytes32 h = _lock();
+        (,,,, uint256 dl,,) = escrow.locks(h);
+
+        vm.warp(dl + escrow.confirmationGrace() + 1);
+        escrow.cancelExpired(h);
+
+        assertEq(escrow.totalLocked(address(token)), 0);
+    }
+
+    /// skim() on a zero-surplus token reverts with ExceedsSurplus.
+    function test_Skim_RevertsWhenNoSurplus() public {
+        _lock(); // 100 000 tokens locked — no surplus
+
+        vm.expectRevert(PerihelionEscrow.ExceedsSurplus.selector);
+        escrow.skim(address(token), address(this), 1);
+    }
+
+    /// skim() can transfer exactly the surplus (direct-sent tokens above locked amount).
+    function test_Skim_AllowsSurplusOnly() public {
+        bytes32 h = _lock();
+        (,,, uint256 locked,,,) = escrow.locks(h);
+
+        // Simulate surplus: send extra tokens directly to the escrow.
+        uint256 surplus = 500;
+        token.mint(address(escrow), surplus);
+
+        // Trying to skim more than surplus reverts.
+        vm.expectRevert(PerihelionEscrow.ExceedsSurplus.selector);
+        escrow.skim(address(token), address(this), surplus + 1);
+
+        // Skimming exactly the surplus succeeds.
+        address recipient = address(0xBEEF);
+        vm.expectEmit(true, true, false, true);
+        emit Skimmed(address(token), recipient, surplus);
+        escrow.skim(address(token), recipient, surplus);
+
+        assertEq(token.balanceOf(recipient), surplus);
+        // Locked amount still intact.
+        assertEq(escrow.totalLocked(address(token)), locked);
+    }
+
+    /// skim() reverts when called by non-owner.
+    function test_Skim_RevertsWhenNotOwner() public {
+        token.mint(address(escrow), 1000);
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.skim(address(token), address(0xDEAD), 1);
+    }
 }
