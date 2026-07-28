@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   const checkpoint = new FileCheckpointStore(
     process.env.PERIHELION_CHECKPOINT_FILE || "./.perihelion-relayer-checkpoint.json",
   );
-  const relayer = new Relayer(config, watcher, delivery, log, 0, checkpoint);
+  const relayer = new Relayer(config, watcher, delivery, log, config.startBlock, checkpoint);
 
   // Health / readiness / metrics HTTP server.
   const healthPort = Number(process.env.PERIHELION_HEALTH_PORT ?? 8080);
