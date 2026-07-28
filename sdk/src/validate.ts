@@ -62,6 +62,15 @@ function asFiniteNumber(value: unknown, field: string): number {
   return value;
 }
 
+function asPositiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new MempoolResponseError(
+      `'${field}' must be a positive integer (got ${JSON.stringify(value)})`,
+    );
+  }
+  return value;
+}
+
 function asAddress(value: unknown, field: string): Address {
   if (!isAddr(value)) {
     throw new MempoolResponseError(`'${field}' must be a valid address (got ${JSON.stringify(value)})`);
@@ -87,7 +96,7 @@ export function parseIntent(value: unknown): Intent {
     sourceAmount: asString(v.sourceAmount, "intent.sourceAmount"),
     destAsset: asString(v.destAsset, "intent.destAsset"),
     minDestAmount: asString(v.minDestAmount, "intent.minDestAmount"),
-    deadline: asFiniteNumber(v.deadline, "intent.deadline"),
+    deadline: asPositiveInteger(v.deadline, "intent.deadline"),
     nonce: asString(v.nonce, "intent.nonce"),
     preferredSolver: asAddress(v.preferredSolver, "intent.preferredSolver"),
   };

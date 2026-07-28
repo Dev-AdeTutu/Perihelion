@@ -107,6 +107,26 @@ class VerificationCache {
 
 const MAX_FILL_RETRIES = 3;
 
+/**
+ * Floor for the seen-set TTL. A terminal skip (invalid signature, wrong
+ * chain, exhausted retries, ...) must survive long enough to actually
+ * suppress reconsideration — an intent's on-chain deadline is frequently
+ * already in the past (that's *why* it's terminal), so deriving the TTL
+ * from the deadline alone would evict the entry on the very next tick.
+ */
+const MIN_SEEN_TTL_MS = 10 * 60_000;
+
+/**
+ * Convert an intent's Unix-seconds deadline into a Unix-ms TTL for the
+ * seen-set, clamped so a past or non-finite deadline still yields a TTL
+ * far enough in the future to suppress reconsideration.
+ */
+function seenTtlMs(deadline: number): number {
+  const raw = Number(deadline) * 1_000;
+  const floor = Date.now() + MIN_SEEN_TTL_MS;
+  return Number.isFinite(raw) ? Math.max(raw, floor) : floor;
+}
+
 function retryBackoff(attempt: number): number {
   // Exponential backoff: 1s, 2s, 4s …
   return 1_000 * Math.pow(2, attempt);
@@ -232,9 +252,9 @@ export class Solver {
   private async consider(record: IntentRecord): Promise<void> {
     const { intent, signature, hash } = record;
 
-    // Compute deadline in ms for the seen-set TTL.
-    // intent.deadline is seconds since epoch.
-    const deadlineMs = Number(intent.deadline) * 1_000;
+    // Seen-set TTL, clamped so terminal skips of already-expired intents
+    // still stick (see MIN_SEEN_TTL_MS above).
+    const deadlineMs = seenTtlMs(intent.deadline);
 
     // Verify the mempool's hash matches our recomputation.
     const domain = perihelionDomain(this.config.sourceChainId, this.config.escrowAddress);
@@ -266,6 +286,14 @@ export class Solver {
     if (!decision.fill) {
       this.log.info("skipping intent", { hash, reason: decision.reason });
       this.metrics?.recordSkip(decision.reason);
+      // Terminal: this intent will never become fillable (wrong chain,
+      // expired, unsupported asset, reserved for another solver, ...).
+      // Without this, evaluate() re-derives the same terminal verdict
+      // every tick, logging and metric-recording it indefinitely.
+      if (decision.terminal) {
+        this.seen.add(hash, deadlineMs);
+        this.retryState.delete(hash);
+      }
       return;
     }
 
