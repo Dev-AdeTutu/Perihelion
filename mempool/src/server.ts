@@ -1,6 +1,6 @@
 import express, { type Request, Response } from "express";
 import type { Server } from "node:http";
-import { hashIntent, verifyIntent, perihelionDomain } from "@perihelion/sdk";
+import { hashIntent, verifyIntent, perihelionDomain, isExpired } from "@perihelion/sdk";
 import type { Hex, SignedIntent, Address } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
@@ -49,6 +49,11 @@ export class MempoolServer {
         return;
       }
 
+      if (isExpired(signed.intent)) {
+        res.status(400).json({ error: "Intent deadline has passed" });
+        return;
+      }
+
       // Verify EIP-712 signature
       const isValid = await verifyIntent(signed.intent, signed.signature, this.domain);
       if (!isValid) {
@@ -57,6 +62,13 @@ export class MempoolServer {
       }
 
       const hash = hashIntent(signed.intent, this.domain);
+
+      const existing = this.store.get(hash);
+      if (existing) {
+        res.status(409).json({ error: "Intent already exists", hash, status: existing.status });
+        return;
+      }
+
       const record: MempoolIntentRecord = {
         hash,
         intent: signed.intent,

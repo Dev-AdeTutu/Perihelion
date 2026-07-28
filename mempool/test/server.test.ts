@@ -96,3 +96,46 @@ test("rejects an intent signed under a mismatched verifyingContract", async () =
   const body = (await res.json()) as { error: string };
   assert.equal(body.error, "Invalid signature");
 });
+
+test("rejects an intent whose deadline has already passed", async () => {
+  const intent = { ...sampleIntent(), deadline: Math.floor(Date.now() / 1000) - 60 };
+  const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+
+  const res = await submit(intent, signature);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.equal(body.error, "Intent deadline has passed");
+});
+
+test("duplicate submission is rejected with 409 and does not reset a settled intent's status", async () => {
+  const intent = sampleIntent();
+  const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+
+  const first = await submit(intent, signature);
+  assert.equal(first.status, 200);
+  const { hash } = (await first.json()) as { hash: `0x${string}` };
+
+  assert.equal(server.updateStatus(hash, "settled"), true);
+
+  const dup = await submit(intent, signature);
+  assert.equal(dup.status, 409);
+  const dupBody = (await dup.json()) as { status: string };
+  assert.equal(dupBody.status, "settled");
+
+  const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
+  assert.equal(record.status, "settled");
+});
+
+test("terminal statuses are final: updateStatus cannot move a settled intent backwards", async () => {
+  const intent = sampleIntent();
+  const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+
+  const res = await submit(intent, signature);
+  const { hash } = (await res.json()) as { hash: `0x${string}` };
+
+  assert.equal(server.updateStatus(hash, "settled"), true);
+  assert.equal(server.updateStatus(hash, "pending"), false);
+
+  const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
+  assert.equal(record.status, "settled");
+});
