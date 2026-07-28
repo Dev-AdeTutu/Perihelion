@@ -101,30 +101,10 @@ const LOCKED_EVENT_ABI = [
 ] as const;
 
 /**
- * keccak256("Locked(bytes32,address,address,address,uint256)")
- *
- * Pre-computed so we can filter logs without viem's `getAbi` overhead.
- * Verified against the contract source:
- *   keccak256("Locked(bytes32,address,address,address,uint256)")
- *   = 0x9f4a8c8b6e7e0e3d2e9f4a8c8b6e7e0e3d2e9f4a8c8b6e7e0e3d2e9f4a8c8b (placeholder)
- *
- * In production this should be computed at build time or derived from the ABI.
- */
-const LOCKED_TOPIC = "0x24abdb5865df5079dcc5ac590ff6f01d5c16edbc5fab4e195d9febd1114503da" as Hex;
-
-/**
  * ABI parameters for decoding the non-indexed `Locked` event data:
  *   (address asset, uint256 amount)
  */
 const LOCKED_DATA_PARAMS = parseAbiParameters("address asset, uint256 amount");
-
-/**
- * ABI parameters for decoding the `lock(Intent intent, bytes signature)` calldata.
- * The Intent struct fields, in declaration order:
- */
-const INTENT_PARAMS = parseAbiParameters(
-  "address user, string destination, uint256 sourceChainId, address sourceAsset, uint256 sourceAmount, string destAsset, uint256 minDestAmount, uint256 deadline, uint256 nonce, address preferredSolver",
-);
 
 // ---------------------------------------------------------------------------
 // Config

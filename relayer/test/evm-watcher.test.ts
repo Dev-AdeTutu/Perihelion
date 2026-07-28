@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EVMSourceWatcher } from "../src/evm-watcher.js";
 import type { EVMSourceWatcherConfig } from "../src/evm-watcher.js";
-import { encodeAbiParameters, parseAbiParameters, keccak256, toHex, type Hex } from "viem";
+import { encodeAbiParameters, parseAbiParameters, keccak256, toHex, toEventSelector, type Hex } from "viem";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -203,3 +203,24 @@ test("EVMSourceWatcher: solver address extracted from indexed topic", async () =
   const solver = messages[0]!.message.solver.toLowerCase();
   assert.equal(solver, ("0x" + SOLVER.slice(2).toLowerCase()) as string);
 });
+
+test("Locked event topic hash is correctly derived from ABI", () => {
+  const lockedEventAbi = [
+    {
+      type: "event" as const,
+      name: "Locked",
+      inputs: [
+        { name: "intentHash", type: "bytes32", indexed: true },
+        { name: "solver",     type: "address", indexed: true },
+        { name: "user",       type: "address", indexed: true },
+        { name: "asset",      type: "address", indexed: false },
+        { name: "amount",     type: "uint256", indexed: false },
+      ],
+    },
+  ] as const;
+
+  const derivedTopic = toEventSelector(lockedEventAbi[0]);
+  assert.ok(derivedTopic.startsWith("0x"), "topic should be hex string");
+  assert.equal(derivedTopic.length, 66, "topic should be 64 hex chars + 0x prefix");
+});
+
