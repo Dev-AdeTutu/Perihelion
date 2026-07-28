@@ -133,21 +133,6 @@ export interface FillDecision {
  * profit_bps = (proceeds - deliveryCost - fees) * 10_000 / proceeds
  * where deliveryCost = minDestAmount (solver must deliver at least this).
  */
-// Decimal places for the documented 1:1 stablecoin corridor in docs/assets.md.
-// EVM USDC/EURC-style stablecoins use 6dp; Stellar assets use 7dp.
-const SOURCE_DECIMALS = 6;
-const DEST_DECIMALS = 7;
-
-export async function priceDestAsset(intent: Intent): Promise<bigint> {
-  // Convert source smallest-units -> human -> dest smallest-units for 1:1 rate.
-  // This follows docs/assets.md instead of baking in an unexplained * 10n.
-  const humanAmount = fromSmallestUnits(intent.sourceAmount, SOURCE_DECIMALS);
-  return BigInt(toSmallestUnits(humanAmount, DEST_DECIMALS));
-
-  // In production, fetch live quotes from an oracle or DEX:
-  // const rate = await fetchStellarDexRate(intent.sourceAsset, intent.destAsset);
-}
-
 /**
  * Returns true when the intent is open to any solver or is reserved for
  * `solverAddress`. Uses viem helpers for checksum-insensitive comparison.
