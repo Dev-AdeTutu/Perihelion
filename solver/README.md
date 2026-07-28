@@ -34,14 +34,19 @@ poll mempool ──► validate hash ──► verify signature ──► evalua
 
 ### Performance optimizations
 
-- **Signature verification caching**: Each intent's signature is verified at most once,
-  with results cached by intent hash. This prevents redundant ECDSA recovery operations
-  when intents are reconsidered (e.g., after retry/reconsideration logic).
+- **Signature verification caching**: Each (domain, intent hash, signature) triple is
+  verified at most once, with results cached by that composite key — not the hash
+  alone — so a corrected resubmission with a different signature is always
+  independently re-verified. This prevents redundant ECDSA recovery operations
+  when the same submission is reconsidered (e.g., after retry/reconsideration logic).
 - **Hash validation**: Before verification, the solver independently recomputes the
   intent hash and compares it to the mempool's returned hash, detecting any
   mempool-trust issues early.
 - **Bounded LRU cache**: The verification cache uses LRU eviction with a configurable
-  size limit (default 10,000 entries) to prevent unbounded memory growth.
+  size limit (default 10,000 entries) to prevent unbounded memory growth. Positive
+  results have no expiry (a valid signature stays valid); negative results expire
+  after a short TTL (60s) so they can't suppress reconsideration indefinitely — see
+  [`VERIFICATION_CACHE.md`](./VERIFICATION_CACHE.md) for details.
 
 | Module        | Responsibility                                                |
 | ------------- | ------------------------------------------------------------- |
