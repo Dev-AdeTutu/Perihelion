@@ -212,6 +212,9 @@ contract PerihelionTimelock {
         op.confirmations += 1;
         emit Confirmed(id, msg.sender, op.confirmations);
         // Start the timelock the moment the threshold is first reached.
+        // readyAt is set at most once and never overwritten — the clock is
+        // monotonic (issue #283). revokeConfirmation no longer clears readyAt,
+        // so a revoke/re-confirm cycle cannot push the execution window forward.
         if (op.readyAt == 0 && op.confirmations >= threshold) {
             op.readyAt = uint64(block.timestamp + delay);
             emit Ready(id, op.readyAt);
@@ -219,7 +222,14 @@ contract PerihelionTimelock {
     }
 
     /// @notice Withdraw a confirmation before execution. If this drops the
-    ///         operation back below threshold, its timelock is reset.
+    ///         operation below threshold it becomes temporarily un-executable
+    ///         (execute() enforces `confirmations >= threshold`), but the
+    ///         readyAt timestamp is **preserved** so the public reaction window
+    ///         cannot be extended by a revoke/re-confirm cycle (issue #283).
+    ///
+    ///         Use this when you change your mind about an operation you
+    ///         already confirmed. To abort an operation entirely, assemble
+    ///         threshold cancel-confirmations via cancel().
     /// @param id Operation id to un-confirm.
     function revokeConfirmation(bytes32 id) external onlyOwner {
         Operation storage op = operations[id];
@@ -228,7 +238,11 @@ contract PerihelionTimelock {
         if (!confirmedBy[id][msg.sender]) revert NotConfirmed();
         confirmedBy[id][msg.sender] = false;
         op.confirmations -= 1;
-        if (op.confirmations < threshold) op.readyAt = 0;
+        // readyAt is intentionally NOT reset. execute() already checks
+        // `op.confirmations >= threshold` and reverts NotEnoughConfirmations
+        // when below threshold, so the operation is safe. The monotonic clock
+        // prevents any owner from indefinitely postponing execution by cycling
+        // revoke → re-confirm just before readyAt.
         emit ConfirmationRevoked(id, msg.sender, op.confirmations);
     }
 

@@ -242,29 +242,113 @@ contract PerihelionTimelockTest is Test {
         assertEq(tl.expiryOf(id), 0);
     }
 
-    // --- Revocation & cancellation ------------------------------------------
+    // --- Revocation & monotonic clock (issue #283) --------------------------
+    //
+    // readyAt is set exactly once (when threshold is first reached) and never
+    // cleared by revokeConfirmation. execute() enforces confirmations >= threshold
+    // independently, so an under-threshold op is blocked from running but the
+    // clock is not reset. A revoke/re-confirm cycle therefore cannot extend the
+    // reaction window indefinitely.
 
-    function test_RevokeResetsTimelock() public {
+    /// @notice AC1: confirm → threshold → revoke → re-confirm preserves readyAt.
+    function test_Revoke_ReadyAtPreserved_AfterRevoke() public {
         bytes memory data = _setValueData(5);
         vm.prank(a);
         bytes32 id = tl.propose(address(target), 0, data, SALT);
         vm.prank(b);
-        tl.confirm(id);
+        tl.confirm(id); // threshold reached
 
-        // b revokes -> back below threshold -> readyAt cleared.
+        (, uint64 readyAtBefore,,) = tl.operations(id);
+        assertGt(readyAtBefore, 0, "readyAt must be set after threshold");
+
+        // b revokes — drops below threshold.
         vm.prank(b);
         tl.revokeConfirmation(id);
-        (uint64 confs, uint64 readyAt,,) = tl.operations(id);
-        assertEq(confs, 1);
-        assertEq(readyAt, 0);
+        (uint64 confs, uint64 readyAtAfterRevoke,,) = tl.operations(id);
+        assertEq(confs, 1, "confirmations decremented");
+        assertEq(
+            readyAtAfterRevoke,
+            readyAtBefore,
+            "readyAt must not change on revoke — monotonic clock (issue #283)"
+        );
 
-        // Re-confirming restarts the full delay from now.
-        vm.warp(block.timestamp + 1 days);
+        // c re-confirms — threshold restored, but readyAt unchanged.
+        vm.warp(block.timestamp + 1 days); // advance time: must not shift the clock
         vm.prank(c);
         tl.confirm(id);
-        (, readyAt,,) = tl.operations(id);
-        assertEq(readyAt, block.timestamp + DELAY);
+        (, uint64 readyAtAfterReconfirm,,) = tl.operations(id);
+        assertEq(
+            readyAtAfterReconfirm,
+            readyAtBefore,
+            "re-confirming must not reset readyAt"
+        );
     }
+
+    /// @notice AC2: an operation below threshold cannot execute even after readyAt.
+    function test_Revoke_BelowThresholdCannotExecuteAfterReadyAt() public {
+        bytes memory data = _setValueData(6);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id); // threshold reached, readyAt = now + DELAY
+
+        // b immediately revokes — back to 1 confirmation, below threshold.
+        vm.prank(b);
+        tl.revokeConfirmation(id);
+
+        // Advance past readyAt — operation is "ready" by time, but not by confirmations.
+        vm.warp(block.timestamp + DELAY + 1);
+
+        // execute must revert NotEnoughConfirmations, not NotReady.
+        vm.prank(a);
+        vm.expectRevert(PerihelionTimelock.NotEnoughConfirmations.selector);
+        tl.execute(address(target), 0, data, SALT);
+    }
+
+    /// @notice Revoke of an operation that never reached threshold (no readyAt)
+    ///         leaves readyAt at 0 — nothing to preserve.
+    function test_Revoke_BeforeThreshold_ReadyAtStaysZero() public {
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, _setValueData(7), SALT);
+        // threshold = 2; only proposer (1 confirm) — not yet ready.
+
+        vm.prank(a);
+        tl.revokeConfirmation(id);
+
+        (, uint64 readyAt,,) = tl.operations(id);
+        assertEq(readyAt, 0, "readyAt should remain 0 when revoked before threshold");
+    }
+
+    /// @notice Revoke → re-confirm → execute: once readyAt has passed and
+    ///         threshold is restored, execute succeeds (regression guard).
+    function test_Revoke_ReconfirmAfterReadyAt_Executes() public {
+        bytes memory data = _setValueData(8);
+        vm.prank(a);
+        bytes32 id = tl.propose(address(target), 0, data, SALT);
+        vm.prank(b);
+        tl.confirm(id); // threshold reached, readyAt = now + DELAY
+
+        (, uint64 readyAt,,) = tl.operations(id);
+
+        // b revokes mid-delay.
+        vm.warp(block.timestamp + DELAY / 2);
+        vm.prank(b);
+        tl.revokeConfirmation(id);
+
+        // readyAt has passed (warp past the original readyAt).
+        vm.warp(readyAt + 1);
+
+        // b re-confirms — threshold restored, readyAt already elapsed.
+        vm.prank(b);
+        tl.confirm(id);
+
+        // execute must succeed immediately (no extra delay).
+        vm.prank(a);
+        tl.execute(address(target), 0, data, SALT);
+        assertEq(target.value(), 8);
+    }
+
+
 
     // --- Cancellation policy ---------------------------------------------------
     //
