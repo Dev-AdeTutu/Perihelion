@@ -62,7 +62,7 @@ export class MempoolServer {
         intent: signed.intent,
         signature: signed.signature,
         status: "pending",
-        submittedAt: Date.now(),
+        createdAt: Date.now(),
       };
 
       this.store.set(hash, record);

@@ -233,7 +233,7 @@ export class PerihelionClient {
     }
     // Deadline + grace must have passed (in seconds; convert ms to s for comparison).
     const now = Math.floor(Date.now() / 1_000);
-    const deadlineWithGrace = record.deadline + Math.floor(confirmationGraceMs / 1_000);
+    const deadlineWithGrace = record.intent.deadline + Math.floor(confirmationGraceMs / 1_000);
     return now >= deadlineWithGrace;
   }
 
