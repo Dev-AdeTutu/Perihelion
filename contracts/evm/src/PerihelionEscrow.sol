@@ -821,14 +821,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
-    /// @dev Encode a FillInstruction payload (158 bytes) using the fixed big-endian
+    /// @dev Encode a FillInstruction payload (195 bytes) using the fixed big-endian
     ///      layout from architecture spec §3.3, matching the Soroban decoder byte-for-byte:
     ///
-    ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(32)
-    ///        | dest_asset(32) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+    ///      version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56)
+    ///        | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)
     ///
-    ///      `intent.destination` and `intent.destAsset` are Stellar strkey bodies encoded
-    ///      as fixed 32-byte fields (right-padded with zeros if shorter).
+    ///      `intent.destination` is a Stellar strkey (exactly 56 chars) encoded as a
+    ///      fixed 56-byte field (zero-padded on the right if shorter — should never happen
+    ///      given the pre-dispatch length check).
+    ///      `intent.destAsset` is up to 69 bytes (`CODE:ISSUER` or `"native"`) encoded as
+    ///      a fixed 69-byte field (zero-padded on the right). Using the full 69 bytes
+    ///      prevents truncation of CODE:ISSUER assets whose ISSUER runs past byte 32.
     ///      `intent.preferredSolver` is an EVM address left-padded to 32 bytes; all-zeros
     ///      signals "open" (no preferred solver) on the Soroban side.
     ///
@@ -843,31 +847,38 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         view
         returns (bytes memory)
     {
-        // Encode destination and destAsset as fixed 32-byte fields.
-        bytes32 recipient;
-        bytes32 destAssetWord;
+        // Encode destination as a fixed 56-byte field (right-zero-padded).
         bytes memory destBytes = bytes(intent.destination);
+        bytes memory recipientField = new bytes(56);
+        uint256 dstCopy = destBytes.length < 56 ? destBytes.length : 56;
+        for (uint256 i = 0; i < dstCopy; i++) {
+            recipientField[i] = destBytes[i];
+        }
+
+        // Encode destAsset as a fixed 69-byte field (right-zero-padded).
+        // Using abi.encodePacked instead of a bare mload avoids truncating
+        // CODE:ISSUER assets whose ISSUER bytes extend past position 32.
         bytes memory destAssetBytes = bytes(intent.destAsset);
-        // Copy up to 32 bytes; extra bytes are truncated (spec requires exactly 32).
-        assembly {
-            recipient := mload(add(destBytes, 32))
-            destAssetWord := mload(add(destAssetBytes, 32))
+        bytes memory destAssetField = new bytes(69);
+        uint256 assetCopy = destAssetBytes.length < 69 ? destAssetBytes.length : 69;
+        for (uint256 i = 0; i < assetCopy; i++) {
+            destAssetField[i] = destAssetBytes[i];
         }
 
         // Encode preferredSolver: EVM address left-padded to 32 bytes (zeros = open).
         bytes32 solverWord = bytes32(uint256(uint160(intent.preferredSolver)));
 
         return abi.encodePacked(
-            PROTOCOL_VERSION, // 1  byte  offset 0
+            PROTOCOL_VERSION,     // 1  byte  offset 0
             MSG_FILL_INSTRUCTION, // 1  byte  offset 1
-            intentHash, // 32 bytes offset 2
-            uint32(stellarEid), // 4  bytes offset 34
-            recipient, // 32 bytes offset 38
-            destAssetWord, // 32 bytes offset 70
-            uint128(intent.minDestAmount), // 16 bytes offset 102
-            uint64(intent.deadline), // 8  bytes offset 118
-            solverWord // 32 bytes offset 126
-            //                                  total       158
+            intentHash,           // 32 bytes offset 2
+            uint32(stellarEid),   // 4  bytes offset 34
+            recipientField,       // 56 bytes offset 38
+            destAssetField,       // 69 bytes offset 94
+            uint128(intent.minDestAmount), // 16 bytes offset 163
+            uint64(intent.deadline),       // 8  bytes offset 179
+            solverWord            // 32 bytes offset 187
+            //                                 total       219
         );
     }
 

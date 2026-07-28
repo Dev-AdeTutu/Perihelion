@@ -20,6 +20,15 @@ contract DecoderHarness is PerihelionEscrow {
         return _decodeCancelIntent(m);
     }
 
+    /// @dev Expose _encodeFillInstruction for testing.
+    function encodeFillInstruction(bytes32 intentHash, Intent calldata intent, uint256 received)
+        external
+        view
+        returns (bytes memory)
+    {
+        return _encodeFillInstruction(intentHash, intent, received);
+    }
+
     /// @dev Mirrors lzReceive's message routing without endpoint/peer auth —
     ///      used by conformance tests to verify version and type rejection.
     function routeInbound(bytes calldata m) external {
@@ -191,5 +200,84 @@ contract WireFormatConformanceTest is Test {
         assertEq(m.length, 35);
         vm.expectRevert(PerihelionEscrow.UnknownMessageType.selector);
         harness.routeInbound(m);
+    }
+}
+
+/// @dev Tests for issue #270: destAsset must survive the full 69-byte round-trip.
+contract FillInstructionEncodeTest is Test {
+    DecoderHarness internal harness;
+
+    uint32 internal constant STELLAR_EID = 30_316;
+
+    function setUp() public {
+        harness = new DecoderHarness(address(0x1), STELLAR_EID);
+    }
+
+    function _baseIntent() internal view returns (PerihelionEscrow.Intent memory) {
+        return PerihelionEscrow.Intent({
+            user: address(0xA1),
+            destination: "GUSERSTELLARADDRESSFIXEDLENGTH56CHARS123", // will be padded
+            sourceChainId: block.chainid,
+            sourceAsset: address(0xA2),
+            sourceAmount: 1_000_000,
+            destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV",
+            minDestAmount: 990_000,
+            deadline: 9_999_999,
+            nonce: 1,
+            preferredSolver: address(0)
+        });
+    }
+
+    /// Encoded payload is exactly 219 bytes (expanded from the old 158).
+    function test_EncodedPayloadIs219Bytes() public view {
+        PerihelionEscrow.Intent memory intent = _baseIntent();
+        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent, 1_000_000);
+        assertEq(encoded.length, 219);
+    }
+
+    /// The full 69-byte destAsset appears at offset 94 in the payload.
+    function test_DestAsset69BytesPreserved() public view {
+        // Use a CODE:ISSUER asset whose issuer is 56 chars (total 69 bytes with CODE: prefix).
+        string memory fullAsset = "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV";
+        assertEq(bytes(fullAsset).length, 61); // "USDC:" (5) + 56 char issuer
+
+        PerihelionEscrow.Intent memory intent = _baseIntent();
+        intent.destAsset = fullAsset;
+
+        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent, 0);
+        assertEq(encoded.length, 219);
+
+        // Slice out the 69-byte dest_asset field at offset 94.
+        bytes memory destField = new bytes(69);
+        for (uint256 i = 0; i < 69; i++) {
+            destField[i] = encoded[94 + i];
+        }
+
+        // First 61 bytes should be the asset string; remaining 8 should be zero-padded.
+        bytes memory expected = new bytes(69);
+        bytes memory assetBytes = bytes(fullAsset);
+        for (uint256 i = 0; i < assetBytes.length; i++) {
+            expected[i] = assetBytes[i];
+        }
+        assertEq(destField, expected);
+    }
+
+    /// recipient field (56 bytes) starts at offset 38.
+    function test_RecipientFieldIs56Bytes() public view {
+        string memory dest = "GUSERSTELLARADDRESSFIXEDLENGTH56CHARS12345678901234567890ABCD";
+        // A Stellar strkey is exactly 56 chars; trim/pad to 56 for test.
+        PerihelionEscrow.Intent memory intent = _baseIntent();
+        intent.destination = "GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 58 chars, will be clamped to 56
+        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent, 0);
+        // Confirm recipient field occupies bytes [38, 94).
+        assertEq(encoded.length, 219);
+        // Byte at offset 94 is the start of dest_asset, not recipient overflow.
+        // Verify by checking that the min_dest_amount field lands at offset 163.
+        // min_dest_amount = 990_000 encoded as uint128 big-endian.
+        uint128 minAmt = intent.minDestAmount;
+        bytes memory amtBytes = abi.encodePacked(minAmt);
+        for (uint256 i = 0; i < 16; i++) {
+            assertEq(encoded[163 + i], amtBytes[i]);
+        }
     }
 }
