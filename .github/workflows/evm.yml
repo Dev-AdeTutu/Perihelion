@@ -40,10 +40,12 @@ jobs:
         run: forge fmt --check
 
       - name: Build
-        run: forge build
+        working-directory: .
+        run: make build-evm
 
       - name: Tests
-        run: forge test -vvv
+        working-directory: .
+        run: make test-evm
 
   slither:
     name: Slither (static analysis)

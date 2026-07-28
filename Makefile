@@ -14,6 +14,8 @@
 
 .PHONY: help \
         build build-ts build-soroban build-evm \
+        build-all-strict test-all-strict       \
+        assert-all-toolchains                  \
         test  test-ts  test-soroban  test-evm  \
         lint  lint-ts  lint-soroban  lint-evm  \
         fmt   fmt-ts   fmt-soroban   fmt-evm   \
@@ -23,7 +25,8 @@
         clean                                  \
         fuzz fuzz-bounded fuzz-extended fuzz-nightly \
         fuzz-evm fuzz-rust fuzz-cross          \
-        clean-corpus
+        clean-corpus                           \
+        doctor
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Help
@@ -34,23 +37,52 @@ help: ## Show available targets
 	@echo ''
 	@echo 'Usage:  make [target]'
 	@echo ''
-	@echo 'Composite targets (run all stacks):'
+	@echo 'Composite targets (run all stacks; gracefully skip missing toolchains):'
 	@grep -E '^(build|test|lint|fmt|coverage|gas|audit|clean):' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 	@echo ''
-	@echo 'Per-stack targets:'
-	@grep -E '^[a-zA-Z_-]+-[a-zA-Z]+:.*?## ' $(MAKEFILE_LIST) | \
+	@echo 'Strict composite targets (fail fast if any toolchain is missing — for CI):'
+	@grep -E '^[a-zA-Z_-]+-all-strict:.*?## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
+	@echo ''
+	@echo 'Per-stack targets (skip gracefully if their toolchain is missing):'
+	@grep -E '^[a-zA-Z_-]+-[a-zA-Z]+:.*?## ' $(MAKEFILE_LIST) | grep -v -- '-all-strict:' | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 	@echo ''
 	@echo 'Fuzzing targets:'
 	@grep -E '^fuzz[a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
+	@echo ''
+	@echo 'Diagnostics:'
+	@grep -E '^doctor:.*?## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STRICT-CI HELPER
+# ─────────────────────────────────────────────────────────────────────────────
+# assert-all-toolchains is intentionally undocumented (no "## " comment) so it
+# stays out of `make help` — it's an internal guard used by *-all-strict only.
+
+assert-all-toolchains:
+	@missing=""; \
+	command -v npm   >/dev/null 2>&1 || missing="$$missing node/npm"; \
+	command -v cargo >/dev/null 2>&1 || missing="$$missing cargo"; \
+	command -v forge >/dev/null 2>&1 || missing="$$missing forge"; \
+	if [ -n "$$missing" ]; then \
+		echo "✖ missing required toolchain(s):$$missing"; \
+		echo "  build-all-strict / test-all-strict require Node, Rust/cargo, and"; \
+		echo "  Foundry/forge to ALL be installed — this target does not skip."; \
+		echo "  Run 'make doctor' for a full report, or use 'make build'/'make test'"; \
+		echo "  for the graceful per-stack behaviour instead."; \
+		exit 1; \
+	fi; \
+	echo "✔ all toolchains present (node/npm, cargo, forge)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BUILD
 # ─────────────────────────────────────────────────────────────────────────────
 
-build: build-ts build-soroban build-evm ## Build all stacks
+build: build-ts build-soroban build-evm ## Build all stacks (skips a stack if its toolchain is missing)
 
 build-ts: ## Build TypeScript packages (sdk, solver, relayer, mempool)
 	@echo "▶ build-ts"
@@ -58,17 +90,30 @@ build-ts: ## Build TypeScript packages (sdk, solver, relayer, mempool)
 
 build-soroban: ## Build Soroban settlement contract (wasm release)
 	@echo "▶ build-soroban"
-	cd contracts/soroban && cargo build --target wasm32-unknown-unknown --release
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd contracts/soroban && cargo build --target wasm32-unknown-unknown --release; \
+	else \
+		echo "⏭ skipping build-soroban — cargo not installed (install: https://rustup.rs)"; \
+	fi
 
 build-evm: ## Build EVM escrow contract (Foundry)
 	@echo "▶ build-evm"
-	cd contracts/evm && forge build
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge build; \
+	else \
+		echo "⏭ skipping build-evm — forge not installed (install: https://getfoundry.sh)"; \
+	fi
+
+build-all-strict: assert-all-toolchains ## Build all stacks; FAILS if any toolchain is missing (CI use)
+	@echo "▶ build-all-strict"
+	@$(MAKE) --no-print-directory build-ts build-soroban build-evm
+	@echo "✔ build-all-strict complete — node, cargo, and forge were all present"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST
 # ─────────────────────────────────────────────────────────────────────────────
 
-test: test-ts test-soroban test-evm ## Run all test suites
+test: test-ts test-soroban test-evm ## Run all test suites (skips a stack if its toolchain is missing)
 
 test-ts: ## Run TypeScript tests (sdk, solver, relayer, mempool)
 	@echo "▶ test-ts"
@@ -76,11 +121,24 @@ test-ts: ## Run TypeScript tests (sdk, solver, relayer, mempool)
 
 test-soroban: ## Run Soroban/Rust unit tests
 	@echo "▶ test-soroban"
-	cd contracts/soroban && cargo test
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd contracts/soroban && cargo test; \
+	else \
+		echo "⏭ skipping test-soroban — cargo not installed (install: https://rustup.rs)"; \
+	fi
 
 test-evm: ## Run EVM Solidity tests (Foundry)
 	@echo "▶ test-evm"
-	cd contracts/evm && forge test -vvv
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge test -vvv; \
+	else \
+		echo "⏭ skipping test-evm — forge not installed (install: https://getfoundry.sh)"; \
+	fi
+
+test-all-strict: assert-all-toolchains ## Run all test suites; FAILS if any toolchain is missing (CI use)
+	@echo "▶ test-all-strict"
+	@$(MAKE) --no-print-directory test-ts test-soroban test-evm
+	@echo "✔ test-all-strict complete — node, cargo, and forge were all present"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LINT
@@ -94,7 +152,11 @@ lint-ts: ## Lint TypeScript packages
 
 lint-soroban: ## Clippy lint for Soroban contract
 	@echo "▶ lint-soroban"
-	cd contracts/soroban && cargo clippy --all-targets -- -D warnings
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd contracts/soroban && cargo clippy --all-targets -- -D warnings; \
+	else \
+		echo "⏭ skipping lint-soroban — cargo not installed (install: https://rustup.rs)"; \
+	fi
 
 lint-evm: ## Slither static analysis for EVM contract (requires slither)
 	@echo "▶ lint-evm"
@@ -118,11 +180,19 @@ fmt-ts: ## Format TypeScript (prettier, if configured)
 
 fmt-soroban: ## Format Rust code (rustfmt)
 	@echo "▶ fmt-soroban"
-	cd contracts/soroban && cargo fmt --all
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd contracts/soroban && cargo fmt --all; \
+	else \
+		echo "⏭ skipping fmt-soroban — cargo not installed (install: https://rustup.rs)"; \
+	fi
 
 fmt-evm: ## Format Solidity code (forge fmt)
 	@echo "▶ fmt-evm"
-	cd contracts/evm && forge fmt
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge fmt; \
+	else \
+		echo "⏭ skipping fmt-evm — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COVERAGE
@@ -138,7 +208,11 @@ coverage-ts: ## TypeScript test coverage via c8/node --experimental-test-coverag
 
 coverage-evm: ## EVM Solidity coverage via forge coverage
 	@echo "▶ coverage-evm"
-	cd contracts/evm && forge coverage
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge coverage; \
+	else \
+		echo "⏭ skipping coverage-evm — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GAS
@@ -146,7 +220,11 @@ coverage-evm: ## EVM Solidity coverage via forge coverage
 
 gas: ## Print EVM gas report (forge test --gas-report)
 	@echo "▶ gas"
-	cd contracts/evm && forge test --gas-report
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge test --gas-report; \
+	else \
+		echo "⏭ skipping gas — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUDIT / SECURITY HELPERS
@@ -160,7 +238,11 @@ audit-ts: ## npm audit for TypeScript packages
 
 audit-evm: ## Slither + forge build for EVM (full static analysis pass)
 	@echo "▶ audit-evm"
-	cd contracts/evm && forge build
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge build; \
+	else \
+		echo "⏭ skipping audit-evm build step — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 	@if command -v slither >/dev/null 2>&1; then \
 		cd contracts/evm && slither . --config-file slither.config.json; \
 	else \
@@ -174,8 +256,16 @@ audit-evm: ## Slither + forge build for EVM (full static analysis pass)
 clean: ## Remove all build artefacts (dist/, target/, forge cache)
 	@echo "▶ clean"
 	npm run clean
-	cd contracts/soroban && cargo clean
-	cd contracts/evm && forge clean
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd contracts/soroban && cargo clean; \
+	else \
+		echo "⏭ skipping cargo clean — cargo not installed (install: https://rustup.rs)"; \
+	fi
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge clean; \
+	else \
+		echo "⏭ skipping forge clean — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DIFFERENTIAL FUZZING  (preserved from the original Makefile)
@@ -197,15 +287,27 @@ fuzz-nightly: ## Run differential fuzzing — nightly mode (100 k cases, ~1 hr)
 
 fuzz-evm: ## Run EVM-only differential fuzzing
 	@echo "▶ fuzz-evm"
-	cd contracts/evm && forge test --match-contract DifferentialFuzz -vv
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge test --match-contract DifferentialFuzz -vv; \
+	else \
+		echo "⏭ skipping fuzz-evm — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 fuzz-rust: ## Run Soroban/Rust differential fuzzing (100 proptest cases)
 	@echo "▶ fuzz-rust"
-	cd contracts/soroban/settlement && PROPTEST_CASES=100 cargo test fuzz -- --test-threads=1
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd contracts/soroban/settlement && PROPTEST_CASES=100 cargo test fuzz -- --test-threads=1; \
+	else \
+		echo "⏭ skipping fuzz-rust — cargo not installed (install: https://rustup.rs)"; \
+	fi
 
 fuzz-cross: ## Run cross-language validation (Soroban corpus → Solidity decoder)
 	@echo "▶ fuzz-cross"
-	cd contracts/evm && forge test --match-contract CrossValidate -vv
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts/evm && forge test --match-contract CrossValidate -vv; \
+	else \
+		echo "⏭ skipping fuzz-cross — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 clean-corpus: ## Remove generated fuzz corpus files
 	@echo "▶ clean-corpus"
@@ -220,6 +322,63 @@ test-e2e: ## Run end-to-end integration tests
 test-e2e-watch: ## Run end-to-end tests in watch mode
 	@echo "▶ test-e2e-watch"
 	cd test && npm run test:watch
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+doctor: ## Report installed toolchain versions vs their pinned versions
+	@echo "════════════════════════════════════════════════════════════"
+	@echo " Perihelion toolchain doctor"
+	@echo "════════════════════════════════════════════════════════════"
+	@echo ""
+	@echo "Node.js ────────────────────────────────────────────────────"
+	@if command -v node >/dev/null 2>&1; then \
+		echo "  installed : $$(node --version)"; \
+	else \
+		echo "  installed : ✖ not found  (install: https://nodejs.org, or use nvm/fnm)"; \
+	fi
+	@if [ -f .nvmrc ]; then \
+		echo "  pinned    : $$(cat .nvmrc)  (.nvmrc)"; \
+	else \
+		echo "  pinned    : — no .nvmrc found"; \
+	fi
+	@echo ""
+	@echo "Rust / cargo ───────────────────────────────────────────────"
+	@if command -v cargo >/dev/null 2>&1; then \
+		echo "  installed : $$(cargo --version)"; \
+	else \
+		echo "  installed : ✖ not found  (install: https://rustup.rs)"; \
+	fi
+	@if [ -f rust-toolchain.toml ]; then \
+		pinned=$$(grep -m1 '^channel' rust-toolchain.toml | sed -E 's/.*"([^"]*)".*/\1/'); \
+		echo "  pinned    : $$pinned  (rust-toolchain.toml)"; \
+		if command -v cargo >/dev/null 2>&1; then \
+			installed_ver=$$(cargo --version | awk '{print $$2}'); \
+			if [ "$$installed_ver" = "$$pinned" ]; then \
+				echo "  status    : ✔ matches pin"; \
+			else \
+				echo "  status    : ⚠ mismatch — installed $$installed_ver, pinned $$pinned"; \
+			fi; \
+		fi; \
+	else \
+		echo "  pinned    : — no rust-toolchain.toml found"; \
+	fi
+	@echo ""
+	@echo "Foundry / forge ────────────────────────────────────────────"
+	@if command -v forge >/dev/null 2>&1; then \
+		echo "  installed : $$(forge --version | head -1)"; \
+	else \
+		echo "  installed : ✖ not found  (install: https://getfoundry.sh)"; \
+	fi
+	@pinned_forge=$$(grep -h 'version:' .github/workflows/evm.yml 2>/dev/null | head -1 | sed -E 's/.*version:[[:space:]]*//'); \
+	if [ -n "$$pinned_forge" ]; then \
+		echo "  pinned    : $$pinned_forge  (.github/workflows/evm.yml)"; \
+	else \
+		echo "  pinned    : — no pin found (checked contracts/evm/foundry.toml and .github/workflows/evm.yml)"; \
+	fi
+	@echo ""
+	@echo "════════════════════════════════════════════════════════════"
 
 # ─────────────────────────────────────────────────────────────────────────────
 
