@@ -568,6 +568,14 @@ impl Perihelion {
         env.storage()
             .persistent()
             .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
+        // Extend ConfirmationSent to MAX_TTL so it outlives record archival and
+        // status() can return ConfirmationSent even after the IntentRecord is gone
+        // (issue #284 / #29 retention-asymmetry invariant).
+        env.storage().persistent().extend_ttl(
+            &DataKey::ConfirmationSent(intent_hash.clone()),
+            MAX_TTL / 2,
+            MAX_TTL,
+        );
 
         rec.status = IntentStatus::ConfirmationSent;
         env.storage().persistent().set(&key, &rec);
@@ -657,11 +665,23 @@ impl Perihelion {
         rec.status = IntentStatus::ConfirmationSent;
         env.storage().persistent().set(&key, &rec);
 
+        // Write the ConfirmationSent marker so status() can distinguish
+        // ConfirmationSent from Filled-but-undispatched (issue #284), and extend
+        // it to MAX_TTL so it survives record archival alongside Settled.
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
+
         // Refresh TTLs touched by this call.
         let bump = Self::ttl_for_deadline(&env, rec.deadline);
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
         env.storage().persistent().extend_ttl(
             &DataKey::Settled(intent_hash.clone()),
+            MAX_TTL / 2,
+            MAX_TTL,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ConfirmationSent(intent_hash.clone()),
             MAX_TTL / 2,
             MAX_TTL,
         );
@@ -826,13 +846,19 @@ impl Perihelion {
             .get(&DataKey::Intent(intent_hash))
     }
 
-    /// Combined, authoritative intent status view (issue #29).
+    /// Combined, authoritative intent status view (issue #29, #284).
     ///
     /// Consults the durable idempotency markers first (they survive record
     /// archival), then falls back to the live `IntentRecord`. Returns:
     ///
-    /// - `IntentStatus::Filled` / `ConfirmationSent` — `Settled` marker is set;
-    ///   the intent was filled. (The record may already be archived.)
+    /// - `IntentStatus::ConfirmationSent` — `ConfirmationSent` marker is set;
+    ///   `dispatch_confirmation` (or `fill_intent`) has successfully dispatched
+    ///   the cross-chain FillConfirmed message.
+    /// - `IntentStatus::Filled` — `Settled` marker is set but `ConfirmationSent`
+    ///   marker is absent; the solver delivered the asset on Stellar via
+    ///   `deliver_intent` but `dispatch_confirmation` has not yet been called.
+    ///   The solver is not yet repaid on the source chain. Callers should invoke
+    ///   `dispatch_confirmation` to push the confirmation through.
     /// - `IntentStatus::Cancelled` — `Cancelled` marker is set.
     /// - The `IntentRecord::status` value — if the record is still live and no
     ///   terminal marker exists yet (e.g. `Locked`, `Filled` before dispatch).
@@ -845,9 +871,14 @@ impl Perihelion {
     /// use `get_intent == None` as a proxy for "unknown or pending".
     pub fn status(env: Env, intent_hash: BytesN<32>) -> Option<IntentStatus> {
         let p = env.storage().persistent();
-        // Markers are the source of truth for terminal state — check them first.
-        if p.has(&DataKey::Settled(intent_hash.clone())) {
+        // Check ConfirmationSent first: FillConfirmed has been dispatched.
+        if p.has(&DataKey::ConfirmationSent(intent_hash.clone())) {
             return Some(IntentStatus::ConfirmationSent);
+        }
+        // Settled without ConfirmationSent: deliver_intent ran but
+        // dispatch_confirmation has not yet been called (issue #284).
+        if p.has(&DataKey::Settled(intent_hash.clone())) {
+            return Some(IntentStatus::Filled);
         }
         if p.has(&DataKey::Cancelled(intent_hash.clone())) {
             return Some(IntentStatus::Cancelled);
