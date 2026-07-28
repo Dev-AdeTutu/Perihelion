@@ -38,9 +38,13 @@ export type DecimalsLookup = (assetId: string) => number | Promise<number>;
 
 /**
  * Returns the exchange rate: how many dest-asset human units equal one
- * source-asset human unit. E.g. for USDC→USDC on a 1:1 corridor: 1.0.
+ * source-asset human unit, scaled by {@link RATE_SCALE} (10^18). E.g. for a
+ * 1:1 USDC→USDC corridor: `RATE_SCALE` itself.
  */
-export type PriceOracle = (sourceAsset: string, destAsset: string) => Promise<number>;
+export type PriceOracle = (sourceAsset: string, destAsset: string) => Promise<bigint>;
+
+/** Fixed-point scale for {@link PriceOracle} rates: `RATE_SCALE` == a rate of 1.0. */
+export const RATE_SCALE = 10n ** 18n;
 
 /**
  * Returns the total fee cost expressed in dest-asset smallest units, covering
@@ -75,7 +79,7 @@ export const defaultDecimalsLookup: DecimalsLookup = (assetId: string): number =
 };
 
 /** 1:1 stub oracle — suitable only for same-value stablecoin corridors. */
-export const defaultPriceOracle: PriceOracle = async () => 1.0;
+export const defaultPriceOracle: PriceOracle = async () => RATE_SCALE;
 
 /** Zero-fee stub — operators must replace with real gas/LayerZero estimates. */
 export const defaultFeeEstimator: FeeEstimator = async () => 0n;
@@ -103,12 +107,16 @@ export async function computeProceeds(
   const dstDecimals = await decimals(intent.destAsset);
   const rate = await oracle(intent.sourceAsset, intent.destAsset);
 
-  if (rate <= 0) throw new Error("[Perihelion] price oracle returned non-positive rate");
+  if (rate <= 0n) throw new Error("[Perihelion] price oracle returned non-positive rate");
 
-  // Convert source amount to human units, apply rate, convert to dest units.
-  const humanSrc = fromSmallestUnits(intent.sourceAmount, srcDecimals);
-  const humanDst = (parseFloat(humanSrc) * rate).toFixed(dstDecimals);
-  return BigInt(toSmallestUnits(humanDst, dstDecimals));
+  // Exact bigint arithmetic: sourceAmount * rate, rescaled from src decimals
+  // and RATE_SCALE to dst decimals. Truncates toward zero (conservative).
+  const srcAmount = BigInt(intent.sourceAmount);
+  const scaleDiff = BigInt(dstDecimals) - BigInt(srcDecimals);
+  const numerator = srcAmount * rate;
+  return scaleDiff >= 0n
+    ? (numerator * 10n ** scaleDiff) / RATE_SCALE
+    : numerator / (RATE_SCALE * 10n ** -scaleDiff);
 }
 
 // ─── decision types ──────────────────────────────────────────────────────────

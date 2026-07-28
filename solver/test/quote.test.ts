@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { buildIntent } from "@perihelion/sdk";
 import { zeroAddress } from "viem";
 import { loadConfig } from "../src/config.js";
-import { evaluate, isSolverEligible } from "../src/quote.js";
+import { computeProceeds, evaluate, isSolverEligible, RATE_SCALE } from "../src/quote.js";
 import { InFlightTracker } from "../src/inventory.js";
 import type { InventoryProvider } from "../src/inventory.js";
 
@@ -18,7 +18,7 @@ const config = loadConfig({
  */
 const usdcDeps: PricingDeps = {
   decimalsLookup: (assetId) => (assetId.startsWith("0x") ? 6 : 7),
-  priceOracle: async () => 1.0,
+  priceOracle: async () => RATE_SCALE,
   feeEstimator: async () => 0n,
 };
 
@@ -99,7 +99,7 @@ test("18dp → 7dp corridor: ETH-like source to Stellar asset", async () => {
   // sourceAmount = 1e18 (1 ETH, 18dp), expect delivery at 1:1 rate = 1e7 dest units (7dp)
   const ethDeps: PricingDeps = {
     decimalsLookup: (assetId) => (assetId.startsWith("0x") ? 18 : 7),
-    priceOracle: async () => 1.0,
+    priceOracle: async () => RATE_SCALE,
     feeEstimator: async () => 0n,
   };
   const i = intent({ sourceAmount: "1000000000000000000", minDestAmount: "9000000" });
@@ -110,12 +110,42 @@ test("18dp → 7dp corridor: ETH-like source to Stellar asset", async () => {
 test("7dp → 7dp corridor: Stellar-to-Stellar same decimals", async () => {
   const stellarDeps: PricingDeps = {
     decimalsLookup: () => 7,
-    priceOracle: async () => 1.0,
+    priceOracle: async () => RATE_SCALE,
     feeEstimator: async () => 0n,
   };
   const i = intent({ sourceAmount: "10000000", minDestAmount: "9900000" });
   const decision = await evaluate(i, config, stellarDeps);
   assert.equal(decision.fill, true);
+});
+
+// ─── exact bigint precision (#311) ───────────────────────────────────────────
+
+test("computeProceeds: 1 WETH (18dp) -> 7dp produces an exact value", async () => {
+  const proceeds = await computeProceeds(
+    intent({ sourceAmount: "1000000000000000000" }),
+    { decimalsLookup: (assetId) => (assetId.startsWith("0x") ? 18 : 7), priceOracle: async () => RATE_SCALE },
+  );
+  assert.equal(proceeds, 10_000_000n);
+});
+
+test("computeProceeds: amount near i128 max does not throw or lose precision", async () => {
+  const i128Max = "170141183460469231731687303715884105727";
+  const proceeds = await computeProceeds(
+    intent({ sourceAmount: i128Max }),
+    { decimalsLookup: () => 7, priceOracle: async () => RATE_SCALE },
+  );
+  assert.equal(proceeds, BigInt(i128Max));
+});
+
+test("computeProceeds: monotonic in sourceAmount", async () => {
+  const deps = { decimalsLookup: () => 7, priceOracle: async () => RATE_SCALE };
+  const amounts = ["1", "100", "10000", "1000000", "100000000000000000"];
+  let prev = -1n;
+  for (const amount of amounts) {
+    const proceeds = await computeProceeds(intent({ sourceAmount: amount }), deps);
+    assert.ok(proceeds > prev, `expected ${proceeds} > ${prev} for amount ${amount}`);
+    prev = proceeds;
+  }
 });
 
 // ─── transient pricing error → non-terminal skip ─────────────────────────────
