@@ -106,6 +106,28 @@ For production use, you likely need to customize:
    - Verify Stellar keypair has funds for transaction fees
    - Test the integration against a testnet first (see [Deployment & Operations](./deployment.md))
 
+### Inventory Model
+
+Each poll tick, the solver checks a destination asset's `availableBalance()` before
+committing to a fill. That balance read hits chain state directly, so it does not
+reflect a fill the solver *just* submitted until the transaction confirms — a real
+gap of several seconds. Without additional bookkeeping, a second intent for the
+same asset could be evaluated against the same stale balance and over-commit it.
+
+To close that gap, `Solver` holds an in-memory `InFlightTracker`
+(`solver/src/inventory.ts`) that is passed into `evaluate()` alongside your
+`InventoryProvider`. Before calling `executor.fill()`, the solver reserves the
+intent's `minDestAmount` against that asset; `evaluate()` subtracts current
+reservations from the balance it reads, so a second intent competing for the
+same capacity is skipped as "insufficient inventory" instead of over-filling.
+The reservation is released in a `finally` block once the fill settles — whether
+it succeeds or fails — so a failed fill immediately frees its capacity for retry
+or for another intent.
+
+This tracker is in-memory only and resets on restart, so it protects a single
+solver process's polling loop; it is not a substitute for your `InventoryProvider`
+reporting real, current balances.
+
 ## Starting the Solver
 
 ### Development mode (with auto-reload)
