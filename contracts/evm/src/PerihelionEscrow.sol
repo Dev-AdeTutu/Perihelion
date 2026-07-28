@@ -42,16 +42,20 @@ import {
 ///      | Event                  | Topics                                              | Data                          |
 ///      |------------------------|-----------------------------------------------------|-------------------------------|
 ///      | Locked                 | intentHash, solver, user                             | asset, amount                 |
-///      | Released               | intentHash, solver, user                             | amount, fillAmount, fillLedger |
-///      | Refunded               | intentHash, user, reason                             | amount                        |
+///      | Released               | intentHash, solver                                  | amount, fillAmount, fillLedger |
+///      | Refunded               | intentHash, user                                    | amount, reason                |
 ///      | PeerSet                | -                                                   | peer                          |
 ///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  |
 ///      | GuardianSet            | guardian                                            | -                             |
 ///      | PausedSet              | -                                                   | paused                        |
-///      | OwnershipTransferStart | previousOwner, newOwner                               | -                             |
-///      | OwnershipTransferred   | previousOwner, newOwner                               | -                             |
-///      | OwnershipTransferCancel| previousOwner                                         | -                             |
+///      | OwnershipTransferStart | previousOwner, newOwner                             | -                             |
+///      | OwnershipTransferred   | previousOwner, newOwner                             | -                             |
+///      | OwnershipTransferCancel| previousOwner                                       | -                             |
 ///      | Skimmed                | token, to                                           | amount                        |
+///      | MaxIntentAmountSet     | -                                                   | maxAmount                     |
+///      | RollingWindowCapSet    | -                                                   | duration, cap                 |
+///      | RollingWindowCapTriggered | windowStart                                      | accumulated                   |
+///      | RollingWindowCapReset  | -                                                   | -                             |
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
