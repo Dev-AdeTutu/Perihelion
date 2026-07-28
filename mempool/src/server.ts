@@ -1,9 +1,14 @@
-import express, { type Request, Response } from "express";
+import express, { type Request, Response, NextFunction } from "express";
 import type { Server } from "node:http";
-import { hashIntent, verifyIntent, perihelionDomain } from "@perihelion/sdk";
+import { hashIntent, verifyIntent, perihelionDomain, parseIntent, isExpired } from "@perihelion/sdk";
 import type { Hex, SignedIntent, Address } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
+
+const SIGNATURE_RE = /^0x[0-9a-fA-F]+$/;
+/** Per-IP submission budget for POST /intents. */
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 60;
 
 export interface MempoolServerOptions {
   port?: number;
@@ -21,6 +26,7 @@ export class MempoolServer {
   private host: string;
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
+  private rateLimitHits = new Map<string, number[]>();
 
   constructor(opts: MempoolServerOptions = {}) {
     this.port = opts.port ?? 3000;
@@ -33,33 +39,65 @@ export class MempoolServer {
   }
 
   private setupRoutes(): void {
-    this.app.use(express.json());
+    this.app.use(express.json({ limit: "8kb" }));
 
-    this.app.post("/intents", this.handleSubmitIntent.bind(this));
+    this.app.post("/intents", this.rateLimit.bind(this), this.handleSubmitIntent.bind(this));
     this.app.get("/intents/:hash", this.handleGetIntent.bind(this));
     this.app.get("/intents", this.handleListIntents.bind(this));
+  }
+
+  /** Rejects an IP once it exceeds a fixed request budget within a sliding window. */
+  private rateLimit(req: Request, res: Response, next: NextFunction): void {
+    const ip = req.ip ?? "unknown";
+    const now = Date.now();
+    const recent = (this.rateLimitHits.get(ip) ?? []).filter(
+      (t) => now - t < RATE_LIMIT_WINDOW_MS,
+    );
+
+    if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
+      res.status(429).json({ error: "Too many requests" });
+      return;
+    }
+
+    recent.push(now);
+    this.rateLimitHits.set(ip, recent);
+    next();
   }
 
   private async handleSubmitIntent(req: Request, res: Response): Promise<void> {
     try {
       const signed = req.body as SignedIntent;
 
-      if (!signed.intent || !signed.signature) {
-        res.status(400).json({ error: "Missing intent or signature" });
+      if (!signed.intent || !signed.signature || !SIGNATURE_RE.test(signed.signature)) {
+        res.status(400).json({ error: "Missing or malformed intent or signature" });
+        return;
+      }
+
+      // Cheap structural validation before the costly signature recovery below.
+      let intent: SignedIntent["intent"];
+      try {
+        intent = parseIntent(signed.intent);
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : "Invalid intent" });
+        return;
+      }
+
+      if (isExpired(intent)) {
+        res.status(400).json({ error: "Intent already expired" });
         return;
       }
 
       // Verify EIP-712 signature
-      const isValid = await verifyIntent(signed.intent, signed.signature, this.domain);
+      const isValid = await verifyIntent(intent, signed.signature, this.domain);
       if (!isValid) {
         res.status(400).json({ error: "Invalid signature" });
         return;
       }
 
-      const hash = hashIntent(signed.intent, this.domain);
+      const hash = hashIntent(intent, this.domain);
       const record: MempoolIntentRecord = {
         hash,
-        intent: signed.intent,
+        intent,
         signature: signed.signature,
         status: "pending",
         submittedAt: Date.now(),
@@ -68,7 +106,8 @@ export class MempoolServer {
       this.store.set(hash, record);
       res.json({ hash });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error("[mempool] submitIntent failed:", err);
+      res.status(500).json({ error: "Internal server error" });
     }
   }
 
