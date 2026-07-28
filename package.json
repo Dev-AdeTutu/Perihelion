@@ -1,6 +1,6 @@
 {
   "name": "perihelion",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "description": "Intent-based cross-chain bridge protocol connecting Stellar to EVM networks",
   "license": "MIT",

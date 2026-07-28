@@ -107,6 +107,36 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
   [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first);
   a change that could violate I1–I5 is blocked regardless of test status.
 
+## Release process
+
+- **Every PR that changes behavior updates [CHANGELOG.md](./CHANGELOG.md).**
+  Add an entry under the `## [Unreleased]` heading, in the `Added` /
+  `Changed` / `Fixed` / `Security` section that matches the change (create
+  the section if it's the first entry of that kind since the last release).
+  A one-line, user-facing summary is enough — link the issue/PR number if
+  one exists.
+- The `Changelog Check` CI job (`.github/workflows/changelog-check.yml`)
+  enforces this: a PR whose title has a `feat:` or `fix:` conventional-commit
+  prefix must touch `CHANGELOG.md`, or carry the `no-changelog` label if the
+  change has no user-visible effect (a pure refactor, internal tooling, a
+  test-only change). Apply the label yourself if you have permission, or ask
+  a maintainer to apply it during review.
+- **Cutting a release:**
+  1. Rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD` (semantic
+     versioning: patch for fixes only, minor for new backward-compatible
+     functionality, major for breaking changes) and start a fresh empty
+     `## [Unreleased]` above it.
+  2. Bump the `version` field in every workspace `package.json` (root,
+     `sdk/`, `relayer/`, `solver/`, `mempool/`, `test/`) and in
+     `contracts/soroban/Cargo.toml`'s `[workspace.package]` to the same
+     `x.y.z`, then run `npm install` and `cargo update -p perihelion-settlement
+     --precise x.y.z` so the lockfiles stay consistent.
+  3. Open a PR with just the version bump and changelog rename; once merged,
+     tag the resulting commit `vx.y.z` and push the tag.
+  - This monorepo does not yet use per-package independent versioning or
+    changeset/release-please automation — all packages move together until
+    a package reaches 1.0 and needs its own release cadence.
+
 ## Merge criteria
 
 - All CI checks pass.

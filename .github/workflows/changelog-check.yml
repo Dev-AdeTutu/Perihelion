@@ -1,0 +1,47 @@
+name: Changelog Check
+
+# Verifies that a PR whose title carries a user-facing conventional-commit
+# type (feat/fix) either updates CHANGELOG.md or is explicitly exempted via
+# the `no-changelog` label. See CONTRIBUTING.md#release-process.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: changelog-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: CHANGELOG.md updated
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for CHANGELOG.md entry or exemption label
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ! [[ "$PR_TITLE" =~ ^(feat|fix)(\([a-z-]+\))?(!)?: ]]; then
+            echo "PR title has no feat:/fix: prefix — no changelog entry required."
+            exit 0
+          fi
+
+          has_label=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '[.[].name] | any(. == "no-changelog")')
+          if [[ "$has_label" == "true" ]]; then
+            echo "PR carries the 'no-changelog' label — skipping."
+            exit 0
+          fi
+
+          changed_files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          if grep -qx "CHANGELOG.md" <<< "$changed_files"; then
+            echo "CHANGELOG.md was updated."
+            exit 0
+          fi
+
+          echo "::error::This PR's title is 'feat:' or 'fix:' but does not touch CHANGELOG.md." \
+            "Add an entry under [Unreleased] in CHANGELOG.md, or apply the 'no-changelog' label" \
+            "if this change has no user-visible effect (pure refactor, internal tooling, etc.)."
+          exit 1
