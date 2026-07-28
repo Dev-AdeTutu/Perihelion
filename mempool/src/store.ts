@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import type { Hex } from "@perihelion/sdk";
 import type { IntentStatus, MempoolIntentRecord } from "./types.js";
 

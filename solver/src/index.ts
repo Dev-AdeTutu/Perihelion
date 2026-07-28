@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+
 /**
  * Entry point for the reference Perihelion solver node.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Perihelion relayer carries LayerZero messages along the Stellar ↔ EVM
  * path. It watches the source chain for locked-fund commitments, waits for

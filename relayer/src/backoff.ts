@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Jitter and exponential-backoff utilities shared by the solver and relayer
  * poll loops.

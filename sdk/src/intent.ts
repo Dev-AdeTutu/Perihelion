@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Intent construction, EIP-712 typing, hashing, and signature verification.
  *

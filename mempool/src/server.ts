@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import express, { type Request, Response } from "express";
 import type { Server } from "node:http";
 import { hashIntent, verifyIntent, perihelionDomain } from "@perihelion/sdk";

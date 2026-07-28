@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Mock implementations of LayerZero transport, EVM contracts, and Soroban
  * contracts for deterministic end-to-end testing without external dependencies.

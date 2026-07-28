@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * @perihelion/sdk — construct, sign, submit, and track Perihelion intents.
  *

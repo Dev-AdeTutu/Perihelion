@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Dead-letter store for persistently-failing bridge messages.
  *

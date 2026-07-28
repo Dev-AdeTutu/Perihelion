@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Types describing LayerZero messages on the Perihelion Stellar ↔ EVM path. */
 
 import type { Hex } from "@perihelion/sdk";

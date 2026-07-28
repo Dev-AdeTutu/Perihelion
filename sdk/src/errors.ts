@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Typed error hierarchy for the Perihelion SDK.
  *

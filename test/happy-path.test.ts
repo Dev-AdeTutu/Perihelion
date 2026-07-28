@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * End-to-end happy path test: user signs → solver locks on EVM → FillInstruction
  * relayed → solver fills on Soroban → FillConfirmed relayed back → escrow

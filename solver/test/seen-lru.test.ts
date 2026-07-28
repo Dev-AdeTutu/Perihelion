@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Tests for the bounded LRU+TTL seen set (Issue 3).
  *

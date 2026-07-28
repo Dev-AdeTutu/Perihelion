@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * End-to-end refund path tests: covering cancellation scenarios where the user
  * gets their funds back from the escrow.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Bounded LRU+TTL cache for the solver `seen` set.
  *

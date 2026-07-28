@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Tests for the solver structured JSON logger (Issue 1 - solver side).
  */

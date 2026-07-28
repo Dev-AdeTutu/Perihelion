@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Profitability evaluation for the reference solver.
  *

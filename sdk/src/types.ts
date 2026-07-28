@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Core protocol types shared across the Perihelion SDK, solver, and relayer.
  *
