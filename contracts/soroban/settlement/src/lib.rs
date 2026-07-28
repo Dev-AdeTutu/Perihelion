@@ -1,0 +1,1374 @@
+// SPDX-License-Identifier: MIT
+
+#![no_std]
+//! # Perihelion Settlement Contract
+//!
+//! The Stellar-side endpoint of the Perihelion intent bridge. It:
+//!
+//! 1. registers locked intents relayed from the source chain (`lz_receive` of a
+//!    FillInstruction),
+//! 2. lets a solver deliver the destination asset from its own inventory and be
+//!    repaid on the source chain (`fill_intent`), and
+//! 3. lets anyone unwind an expired intent and refund the user
+//!    (`cancel_expired_intent`).
+//!
+//! Safety rests on per-intent idempotency markers, an endpoint-only + peer-checked
+//! message boundary, and Soroban transaction atomicity (a failed check rolls back
+//! any token transfer in the same call). See `docs/TECHNICAL-ARCHITECTURE.md`.
+
+mod endpoint;
+mod error;
+mod messages;
+mod types;
+
+#[cfg(test)]
+mod test;
+
+#[cfg(test)]
+mod fuzz;
+
+pub use endpoint::{EndpointClient, LzEndpoint};
+pub use error::PerihelionError;
+pub use types::*;
+
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Symbol};
+
+use messages::{encode_cancel_intent, encode_fill_confirmed};
+
+// =============================================================================
+// EVENT SHAPE SPECIFICATION (issue #102)
+// =============================================================================
+//
+// Events are the off-chain integration surface for indexers, relayers, and
+// monitoring tooling. Each event shape below is a VERSIONED INTERFACE that must
+// be asserted by tests. Changes to event topics or payloads MUST be reflected
+// in both the constants below AND the corresponding EVM-side events.
+//
+// EVM equivalence: See `contracts/evm/src/PerihelionEscrow.sol` for matching
+// event definitions. Cross-chain wire vectors in `contracts/shared/wire-vectors/`.
+//
+// Event shapes (topics tuple, data tuple):
+//
+// | Symbol                   | Topics                          | Data                                           |
+// |--------------------------|---------------------------------|------------------------------------------------|
+// | `initialized`            | ("initialized",)                 | (admin: Address, endpoint: Address)              |
+// | `endpoint_set`         | ("endpoint_set",)                | (old: Address, new: Address)                     |
+// | `peer_set`             | ("peer_set",)                    | (eid: u32, old: Option<BytesN<32>>, new: BytesN<32>) |
+// | `admin_transfer_started` | ("admin_transfer_started",)      | (old: Address, new: Address)                     |
+// | `admin_transfer_completed` | ("admin_transfer_completed",)  | (old: Address, new: Address)                     |
+// | `paused_set`           | ("paused_set",)                  | (paused: bool)                                   |
+// | `native_token_set`     | ("native_token_set",)            | (native_token: Address)                          |
+// | `keeper_reward_set`    | ("keeper_reward_set",)           | (reward: i128)                                   |
+// | `keeper_reward_paid`   | ("keeper_reward_paid", intent_hash) | (caller: Address, reward: i128)               |
+// | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
+// | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
+// | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
+// | `cancelled`            | ("cancelled", intent_hash)       | (src_eid: u32, deadline: u64)                    |
+// | `cancelled_inbound`     | ("cancelled_inbound", intent_hash) | (src_eid: u32)                                  |
+// | `cancel_ignored`       | ("cancel_ignored", intent_hash)    | (status: IntentStatus)                           |
+
+/// Hard ceiling for TTL extension. Mirrors the representative network
+/// `max_entry_ttl`; clamp every extension to this. Should track network config.
+pub const MAX_TTL: u32 = 3_110_400;
+/// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
+/// absorb late confirmations and the refund window.
+const GRACE_LEDGERS: u32 = 120_960;
+/// Minimum ledger close time, in seconds, used to convert a unix deadline into
+/// a TTL bump target. Using the *minimum* close time (4 s) means
+/// `secs / MIN_SECS_PER_LEDGER` always over-estimates the ledger count, so the
+/// TTL is over-provisioned relative to the actual close rate. This is the safe
+/// direction: a too-generous TTL wastes a small amount of rent but an
+/// under-estimate can allow the entry to be archived while still live.
+/// Safety invariant: always round TTL *up*, never down.
+const MIN_SECS_PER_LEDGER: u64 = 4;
+
+/// Maximum deadline horizon, in seconds from the current ledger timestamp.
+/// FillInstructions with `deadline > now + MAX_DEADLINE_HORIZON` are rejected
+/// to prevent trivially pinning an entry at MAX_TTL with a far-future deadline.
+/// 7 days = 604_800 s is aligned with the SDK's intent builder maximum and
+/// covers any realistic cross-chain settlement window.
+pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
+
+/// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
+/// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
+/// Matches the EVM's 1-day minimum to give users time to react to peer rotations.
+pub const MIN_PEER_CHANGE_DELAY: u64 = 86_400; // 1 day in seconds
+
+/// Maximum delay for peer changes. Prevents governance from bricking peer
+/// rotation with an unworkably long delay. Mirrors EVM's MAX_DELAY.
+pub const MAX_PEER_CHANGE_DELAY: u64 = 2_592_000; // 30 days in seconds
+
+#[contract]
+pub struct Perihelion;
+
+#[contractimpl]
+impl Perihelion {
+    /// Initialize with an admin, the trusted LayerZero endpoint, and the native token address.
+    ///
+    /// # Validation (issue #18)
+    /// - `admin` and `endpoint` must be distinct addresses. Conflating them
+    ///   collapses the authorization model: the endpoint is the trusted transport
+    ///   layer (sole caller of `lz_receive`), while admin is the governance key
+    ///   (rotates config, pauses/unpauses). These roles must remain separate.
+    ///   The EVM escrow rejects a zero endpoint address; we extend that principle
+    ///   by also rejecting role collisions, since misconfiguration at init is
+    ///   unrecoverable (there is no re-init path).
+    ///
+    /// # Expected address kinds
+    /// - `endpoint`: must be a **contract** address — the LayerZero endpoint
+    ///   contract deployed on Stellar that calls `lz_receive`.
+    /// - `admin`: typically an **account** (keypair) or a multisig/timelock
+    ///   contract. Should never be the same address as `endpoint`.
+    /// - `native_token`: the SAC (Stellar Asset Contract) address for the native
+    ///   token on the current network. Differs by network (Testnet, Futurenet, Pubnet).
+    ///   Used to pay keeper rewards. Issue #173.
+    ///
+    /// Emits an `initialized` event so deployment tooling can confirm the
+    /// configured values without polling storage.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        endpoint: Address,
+        native_token: Address,
+    ) -> Result<(), PerihelionError> {
+        let storage = env.storage().instance();
+        if storage.has(&DataKey::Admin) {
+            return Err(PerihelionError::AlreadyInitialized);
+        }
+        // Issue #18: reject identical admin and endpoint — role separation invariant.
+        if admin == endpoint {
+            return Err(PerihelionError::AdminEndpointCollision);
+        }
+        storage.set(&DataKey::Admin, &admin);
+        storage.set(&DataKey::Endpoint, &endpoint);
+        storage.set(&DataKey::NativeToken, &native_token);
+        storage.set(&DataKey::Paused, &false);
+        // Issue #173: initialize keeper reward to 0. Admin must call set_keeper_reward
+        // to enable keeper incentives for cancel_expired_intent.
+        storage.set(&DataKey::KeeperReward, &0i128);
+        storage.extend_ttl(17_280, 1_209_600);
+
+        // Issue #16/#18: emit an event so deployment tooling and off-chain
+        // monitors can confirm the configured roles without polling storage.
+        env.events()
+            .publish((Symbol::new(&env, "initialized"),), (admin, endpoint));
+        Ok(())
+    }
+
+    // --- Admin configuration ---------------------------------------------------
+
+    /// Rotate the trusted endpoint. Admin-only.
+    ///
+    /// Emits an `endpoint_set` event with `(old, new)` so off-chain monitors
+    /// can alert on endpoint rotations (issue #16). Endpoint rotations are
+    /// high-sensitivity: a malicious rotation would redirect all inbound
+    /// LayerZero message delivery.
+    pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
+        env.storage()
+            .instance()
+            .set(&DataKey::Endpoint, &new_endpoint);
+        env.events()
+            .publish((Symbol::new(&env, "endpoint_set"),), (old, new_endpoint));
+        Ok(())
+    }
+
+    /// Propose a new peer (EVM escrow address) for a source endpoint id (issue #165).
+    /// Admin-only. Initiates a delayed peer change; the change becomes effective
+    /// only after the minimum delay has elapsed and the admin calls `confirm_peer`.
+    ///
+    /// This brings Soroban peer-management under the same governance/delay model as
+    /// the EVM side (PerihelionTimelock), preventing instant unauthorized peer
+    /// rotation if the admin key is compromised. The delay gives users a window to
+    /// detect and react to a suspicious peer change (e.g., via monitoring alerts).
+    ///
+    /// Emits `peer_change_proposed(eid, old_peer, new_peer, ready_at)` (issue #165).
+    ///
+    /// # Peer symmetry (issue #15)
+    /// The same peer address is used for **both** inbound validation
+    /// (`lz_receive` checks `origin.sender == Peer(origin.src_eid)`) and
+    /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
+    /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
+    /// counterparty for a given endpoint id is symmetric.
+    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
+        let now = env.ledger().timestamp();
+        let ready_at = now + MIN_PEER_CHANGE_DELAY;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPeer(eid), &new_peer);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingPeerTime(eid), &now);
+        env.events().publish(
+            (Symbol::new(&env, "peer_change_proposed"),),
+            (eid, old_peer, new_peer, ready_at),
+        );
+        Ok(())
+    }
+
+    /// Confirm and apply a pending peer change (issue #165). Admin-only.
+    /// Must be called after the minimum delay (`MIN_PEER_CHANGE_DELAY`) has elapsed
+    /// since `propose_peer` was called. Atomically sets the new peer address and
+    /// clears the pending state.
+    ///
+    /// Emits `peer_set(eid, old, new)` when the change is applied (issue #16).
+    ///
+    /// # Errors
+    /// - `NotPendingPeerChange` if no peer change is pending for this eid
+    /// - `PeerChangeNotReady` if the minimum delay has not yet elapsed
+    pub fn confirm_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        let proposed_peer: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeer(eid))
+            .ok_or(PerihelionError::NotPendingPeerChange)?;
+
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeerTime(eid))
+            .ok_or(PerihelionError::NotPendingPeerChange)?;
+
+        let now = env.ledger().timestamp();
+        if now < proposed_at + MIN_PEER_CHANGE_DELAY {
+            return Err(PerihelionError::PeerChangeNotReady);
+        }
+
+        let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
+        env.storage()
+            .instance()
+            .set(&DataKey::Peer(eid), &proposed_peer);
+        env.storage().instance().remove(&DataKey::PendingPeer(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerTime(eid));
+
+        env.events().publish(
+            (Symbol::new(&env, "peer_set"),),
+            (eid, old_peer, proposed_peer),
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending peer change (issue #165). Admin-only.
+    /// Clears any pending peer change without applying it, allowing the admin
+    /// to revoke a proposed change before the delay expires.
+    ///
+    /// Emits `peer_change_cancelled(eid)` (issue #165).
+    pub fn cancel_pending_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        env.storage().instance().remove(&DataKey::PendingPeer(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerTime(eid));
+
+        env.events()
+            .publish((Symbol::new(&env, "peer_change_cancelled"),), (eid,));
+        Ok(())
+    }
+
+    /// Retrieve the currently-active peer address for an endpoint id.
+    pub fn get_peer(env: Env, eid: u32) -> Result<Option<BytesN<32>>, PerihelionError> {
+        Ok(env.storage().instance().get(&DataKey::Peer(eid)))
+    }
+
+    /// Retrieve a pending peer change, if one exists (issue #165).
+    /// Returns (proposed_peer, proposed_at_timestamp) or None if no change pending.
+    pub fn get_pending_peer(
+        env: Env,
+        eid: u32,
+    ) -> Result<Option<(BytesN<32>, u64)>, PerihelionError> {
+        let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
+        let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
+
+        Ok(match (peer, time) {
+            (Some(p), Some(t)) => Some((p, t)),
+            _ => None,
+        })
+    }
+
+    /// Begin a two-step admin handover (issue #17).
+    ///
+    /// Stores `new_admin` as `PendingAdmin`. The nominee must call
+    /// `accept_admin` (authorizing as themselves) to complete the transfer.
+    /// This mirrors the EVM `transferOwnership` / `acceptOwnership` pattern and
+    /// prevents a fat-fingered or uncontrolled address from permanently capturing
+    /// governance.
+    ///
+    /// To cancel a pending handover, call `set_admin` again with the current
+    /// admin's own address (or any address the current admin controls).
+    /// Effectively this overwrites the pending nominee without completing the
+    /// handover, since the current admin remains in place until `accept_admin`
+    /// is called.
+    ///
+    /// Emits `admin_transfer_started(old, new)` (issue #16).
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), PerihelionError> {
+        let current = Self::require_admin(&env)?;
+        current.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transfer_started"),),
+            (current, new_admin),
+        );
+        Ok(())
+    }
+
+    /// Complete a pending admin handover (issue #17).
+    ///
+    /// Must be called by the address stored in `PendingAdmin`. Atomically
+    /// promotes the nominee to `Admin` and clears `PendingAdmin`.
+    ///
+    /// Emits `admin_transfer_completed(old, new)` (issue #16).
+    pub fn accept_admin(env: Env) -> Result<(), PerihelionError> {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(PerihelionError::NotPendingAdmin)?;
+        pending.require_auth();
+        let old = Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transfer_completed"),),
+            (old, pending),
+        );
+        Ok(())
+    }
+
+    /// Emergency halt of state-mutating entrypoints. Admin-only. Fail-safe: a
+    /// paused contract cannot move funds.
+    ///
+    /// Emits `paused_set(value)` (issue #16).
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events()
+            .publish((Symbol::new(&env, "paused_set"),), (paused,));
+        Ok(())
+    }
+
+    /// Set the keeper reward paid to callers of `cancel_expired_intent`. Admin-only.
+    /// A non-zero reward incentivizes third parties to refund expired intents,
+    /// improving the liveness of the cancellation path (issue #173).
+    ///
+    /// The reward is paid in stroops (Stellar's smallest unit, 1 XLM = 10_000_000 stroops).
+    /// Set to 0 to disable the keeper reward and require self-service refunds.
+    ///
+    /// # Safety
+    /// Increasing the reward decreases contract reserves. Operators should ensure
+    /// sufficient funds are available to cover the payout (or accept refund failures
+    /// if reserves are depleted). A typical pattern is to prepay a reserve account
+    /// and use the `set_keeper_reward` to control the payout rate.
+    ///
+    /// Emits `keeper_reward_set(new_reward)` event.
+    pub fn set_keeper_reward(env: Env, reward: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if reward < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperReward, &reward);
+        env.events()
+            .publish((Symbol::new(&env, "keeper_reward_set"),), (reward,));
+        Ok(())
+    }
+
+    /// Set the native token (SAC) address. Admin-only. Required for keeper reward
+    /// payouts. The address differs per network (Testnet, Futurenet, Pubnet).
+    /// Issue #173.
+    pub fn set_native_token(env: Env, native_token: Address) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::NativeToken, &native_token);
+        env.events()
+            .publish((Symbol::new(&env, "native_token_set"),), (native_token,));
+        Ok(())
+    }
+
+    /// Get the native token address. Returns None if not yet configured.
+    pub fn native_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::NativeToken)
+    }
+
+    // --- LayerZero inbound -----------------------------------------------------
+
+    /// LayerZero receive hook. Callable only by the configured endpoint, and only
+    /// for messages from the registered peer on `origin.src_eid`. Replay-guarded
+    /// by a lazy-nonce high-water mark. Dispatches on the message variant.
+    pub fn lz_receive(
+        env: Env,
+        origin: Origin,
+        _guid: BytesN<32>,
+        message: LzMessage,
+    ) -> Result<(), PerihelionError> {
+        // Only the endpoint may deliver messages.
+        Self::require_endpoint(&env)?.require_auth();
+
+        // The sender must be our registered peer for this source endpoint id.
+        let expected: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Peer(origin.src_eid))
+            .ok_or(PerihelionError::UntrustedPeer)?;
+        if expected != origin.sender {
+            return Err(PerihelionError::UntrustedPeer);
+        }
+
+        // Lazy-nonce replay guard (unordered delivery).
+        // NOTE: The eid-pause check is intentionally placed before nonce
+        // consumption. If a corridor is paused, the message is rejected without
+        // advancing the nonce, so it can be re-delivered once the corridor is
+        // unpaused. The global-pause check (if any) follows the same logic.
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::PausedEid(origin.src_eid))
+            .unwrap_or(false)
+        {
+            return Err(PerihelionError::ContractPaused);
+        }
+        Self::accept_nonce(&env, origin.src_eid, origin.nonce)?;
+
+        match message {
+            LzMessage::FillInstruction(fi) => Self::on_fill_instruction(&env, origin.src_eid, fi),
+            LzMessage::Cancel(ci) => Self::on_cancel_inbound(&env, ci),
+        }
+    }
+
+    // --- Solver fill -----------------------------------------------------------
+
+    /// Solver delivers `dest_asset` to the intent recipient from its own inventory,
+    /// records the fill, and durably marks the intent `Filled`. Does NOT dispatch the
+    /// cross-chain FillConfirmed message; call `dispatch_confirmation` separately.
+    /// This separation makes the messaging leg independently retriable (Issue #12).
+    pub fn deliver_intent(
+        env: Env,
+        solver: Address,
+        solver_evm: BytesN<32>,
+        intent_hash: BytesN<32>,
+        fill_amount: i128,
+    ) -> Result<(), PerihelionError> {
+        solver.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Terminal-state guard via cheap markers (survives record archival).
+        if Self::is_finalized(&env, &intent_hash) {
+            return Err(PerihelionError::IntentFinalized);
+        }
+
+        let key = DataKey::Intent(intent_hash.clone());
+        let mut rec: IntentRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        if rec.status != IntentStatus::Locked {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+        if env.ledger().timestamp() >= rec.deadline {
+            return Err(PerihelionError::IntentExpired);
+        }
+        if let Some(ref pref) = rec.preferred_solver {
+            if pref != &solver && env.ledger().timestamp() < rec.reservation_expires {
+                return Err(PerihelionError::ReservedForSolver);
+            }
+        }
+        if fill_amount <= 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        if fill_amount < rec.min_dest_amount {
+            return Err(PerihelionError::InsufficientFillAmount);
+        }
+
+        // Effects before interactions: flip status, write the settled marker.
+        rec.status = IntentStatus::Filled;
+        rec.solver = Some(solver.clone());
+        rec.solver_evm = Some(solver_evm.clone());
+        rec.fill_amount = fill_amount;
+        rec.fill_ledger = env.ledger().sequence();
+        env.storage().persistent().set(&key, &rec);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Settled(intent_hash.clone()), &true);
+
+        // Interaction: deliver the destination asset from the solver to the user.
+        token::TokenClient::new(&env, &rec.dest_asset).transfer(
+            &solver,
+            &rec.recipient,
+            &fill_amount,
+        );
+
+        // Refresh TTLs touched by this call.
+        let bump = Self::ttl_for_deadline(&env, rec.deadline);
+        env.storage().persistent().extend_ttl(&key, bump / 2, bump);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Settled(intent_hash.clone()),
+            MAX_TTL / 2,
+            MAX_TTL,
+        );
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+
+        env.events().publish(
+            (Symbol::new(&env, "filled"), intent_hash),
+            (solver, rec.dest_asset, fill_amount, rec.src_eid),
+        );
+        Ok(())
+    }
+
+    /// Dispatch the FillConfirmed message for an already-filled intent.
+    /// Permissionless: any party can pay to push a stuck confirmation through.
+    /// Guarded against double-dispatch by a marker. Advances intent to `ConfirmationSent`.
+    /// Returns error if the intent is not in `Filled` status or confirmation already sent.
+    pub fn dispatch_confirmation(
+        env: Env,
+        caller: Address,
+        intent_hash: BytesN<32>,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Guard against double-dispatch
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::ConfirmationSent(intent_hash.clone()))
+        {
+            return Err(PerihelionError::IntentFinalized);
+        }
+
+        let key = DataKey::Intent(intent_hash.clone());
+        let mut rec: IntentRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        if rec.status != IntentStatus::Filled {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+
+        let solver = rec.solver.clone().ok_or(PerihelionError::IntentNotFound)?;
+        let solver_evm = rec
+            .solver_evm
+            .clone()
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        // Dispatch FillConfirmed so the source escrow repays the solver.
+        Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
+
+        // Mark dispatch as sent to prevent double-dispatch
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConfirmationSent(intent_hash.clone()), &true);
+
+        rec.status = IntentStatus::ConfirmationSent;
+        env.storage().persistent().set(&key, &rec);
+
+        // Update solver reputation (PROPOSED Phase 3)
+        let fill_latency = env.ledger().sequence() - rec.fill_ledger;
+        Self::update_solver_reputation(&env, &solver, fill_latency)?;
+
+        env.events().publish(
+            (Symbol::new(&env, "confirmation_sent"), intent_hash),
+            (solver,),
+        );
+        Ok(())
+    }
+
+    /// Solver delivers `dest_asset` to the intent recipient and dispatches FillConfirmed
+    /// in a single transaction. Convenience wrapper that calls deliver_intent internally
+    /// and then dispatch_confirmation. For new code, consider calling deliver_intent and
+    /// dispatch_confirmation separately to allow retry of the messaging layer (Issue #12).
+    pub fn fill_intent(
+        env: Env,
+        solver: Address,
+        solver_evm: BytesN<32>,
+        intent_hash: BytesN<32>,
+        fill_amount: i128,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        solver.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Terminal-state guard via cheap markers (survives record archival).
+        if Self::is_finalized(&env, &intent_hash) {
+            return Err(PerihelionError::IntentFinalized);
+        }
+
+        let key = DataKey::Intent(intent_hash.clone());
+        let mut rec: IntentRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        if rec.status != IntentStatus::Locked {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+        if env.ledger().timestamp() >= rec.deadline {
+            return Err(PerihelionError::IntentExpired);
+        }
+        if let Some(ref pref) = rec.preferred_solver {
+            if pref != &solver && env.ledger().timestamp() < rec.reservation_expires {
+                return Err(PerihelionError::ReservedForSolver);
+            }
+        }
+        if fill_amount <= 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        if fill_amount < rec.min_dest_amount {
+            return Err(PerihelionError::InsufficientFillAmount);
+        }
+
+        // Idempotency marker written before the outbound dispatch.
+        env.storage()
+            .persistent()
+            .set(&DataKey::Settled(intent_hash.clone()), &true);
+
+        // Prepare the record in memory through both state transitions. Since Soroban
+        // calls are atomic, no external observer can see intermediate states between
+        // writes. We write the full record exactly once, after send_fill_confirmed
+        // succeeds, reducing storage cost by ~50% on the hot fill path.
+        rec.status = IntentStatus::Filled;
+        rec.solver = Some(solver.clone());
+        rec.solver_evm = Some(solver_evm.clone());
+        rec.fill_amount = fill_amount;
+        rec.fill_ledger = env.ledger().sequence();
+
+        // Interaction: deliver the destination asset from the solver to the user.
+        token::TokenClient::new(&env, &rec.dest_asset).transfer(
+            &solver,
+            &rec.recipient,
+            &fill_amount,
+        );
+
+        // Dispatch FillConfirmed so the source escrow repays the solver.
+        Self::send_fill_confirmed(&env, &solver, &rec, &solver_evm, lz_fee)?;
+
+        // Single persistent write with final status after all interactions succeed.
+        rec.status = IntentStatus::ConfirmationSent;
+        env.storage().persistent().set(&key, &rec);
+
+        // Refresh TTLs touched by this call.
+        let bump = Self::ttl_for_deadline(&env, rec.deadline);
+        env.storage().persistent().extend_ttl(&key, bump / 2, bump);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Settled(intent_hash.clone()),
+            MAX_TTL / 2,
+            MAX_TTL,
+        );
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+
+        env.events().publish(
+            (Symbol::new(&env, "filled"), intent_hash),
+            (solver, rec.dest_asset, fill_amount, rec.src_eid),
+        );
+        Ok(())
+    }
+
+    // --- Cancellation ----------------------------------------------------------
+
+    /// Cancel an intent whose deadline passed without a fill and notify the
+    /// source chain to refund the user. Permissionless (caller funds the LayerZero message).
+    /// If a keeper reward is configured (issue #173), the caller receives a refund to incentivize
+    /// timely cancellation and improve refund liveness.
+    ///
+    /// # Keeper reward (issue #173)
+    /// When `keeper_reward > 0`, the contract pays the caller a refund of XLM stroops,
+    /// compensating for the LayerZero fee. This incentivizes third parties (keepers) to
+    /// monitor and refund expired intents, improving protocol liveness. The reward is paid
+    /// from the contract's balance (funded by admin pre-deposit or user-prepaid tips).
+    /// If the contract has insufficient XLM to pay the reward, the call fails and the
+    /// cancellation does not proceed.
+    pub fn cancel_expired_intent(
+        env: Env,
+        caller: Address,
+        intent_hash: BytesN<32>,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Cancelled marker: already cancelled — terminal, return IntentFinalized.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Cancelled(intent_hash.clone()))
+        {
+            return Err(PerihelionError::IntentFinalized);
+        }
+
+        // Settled marker: intent was filled — return AlreadyFilled so callers can
+        // distinguish "nothing to cancel" from "already cancelled".
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Settled(intent_hash.clone()))
+        {
+            return Err(PerihelionError::AlreadyFilled);
+        }
+
+        let key = DataKey::Intent(intent_hash.clone());
+        let mut rec: IntentRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(PerihelionError::IntentNotFound)?;
+
+        // Belt-and-suspenders: status check covers edge cases where markers lag.
+        if rec.status != IntentStatus::Locked {
+            return Err(match rec.status {
+                IntentStatus::Filled | IntentStatus::ConfirmationSent => {
+                    PerihelionError::AlreadyFilled
+                }
+                _ => PerihelionError::IntentFinalized,
+            });
+        }
+        if env.ledger().timestamp() < rec.deadline {
+            return Err(PerihelionError::DeadlineNotPassed);
+        }
+
+        rec.status = IntentStatus::Cancelled;
+        env.storage().persistent().set(&key, &rec);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Cancelled(intent_hash.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Cancelled(intent_hash.clone()),
+            MAX_TTL / 2,
+            MAX_TTL,
+        );
+
+        Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
+
+        // Issue #173: pay keeper reward if configured. The reward is paid from
+        // contract reserves after the cancellation is finalized, so failures to
+        // pay do not roll back the cancellation.
+        let keeper_reward: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperReward)
+            .unwrap_or(0);
+        if keeper_reward > 0 {
+            // Retrieve the native token address from storage. Issue #173.
+            if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
+                // Transfer the keeper reward using the idiomatic TokenClient pattern.
+                // The contract is the sender; the caller is the recipient.
+                token::TokenClient::new(&env, &native_token).transfer(
+                    &env.current_contract_address(),
+                    &caller,
+                    &keeper_reward,
+                );
+                // Emit an observable event for the reward payout. Issue #173.
+                env.events().publish(
+                    (Symbol::new(&env, "keeper_reward_paid"), intent_hash.clone()),
+                    (caller.clone(), keeper_reward),
+                );
+            }
+            // If native_token is not configured, silently skip the reward.
+            // This allows deployment to proceed before the native token address
+            // is set, though keeper rewards will not be paid. Operators must call
+            // set_native_token and then re-enable rewards via set_keeper_reward.
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "cancelled"), intent_hash),
+            (rec.src_eid, rec.deadline),
+        );
+        Ok(())
+    }
+
+    // --- Views -----------------------------------------------------------------
+
+    /// True if the intent has been settled (filled).
+    pub fn is_settled(env: Env, intent_hash: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Settled(intent_hash))
+    }
+
+    /// True if the intent has been cancelled.
+    pub fn is_cancelled(env: Env, intent_hash: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Cancelled(intent_hash))
+    }
+
+    /// Fetch the full intent record, if registered.
+    ///
+    /// **Retention asymmetry (issue #29):** `get_intent` reads the full
+    /// `IntentRecord` from persistent storage, which is retained only to
+    /// `ttl_for_deadline(deadline)` (the intent's deadline + GRACE_LEDGERS,
+    /// clamped to MAX_TTL). The terminal idempotency markers `Settled` and
+    /// `Cancelled` are bumped to a full `MAX_TTL` on every terminal
+    /// transition, so they outlive the record.
+    ///
+    /// Consequence: after the grace window the record may be archived while
+    /// `is_settled` / `is_cancelled` still return `true`. A consumer that
+    /// treats `get_intent == None` as "intent never existed / still pending"
+    /// will be wrong for aged, settled/cancelled intents.
+    ///
+    /// **For authoritative terminal state use [`status`], which consults the
+    /// durable markers first and falls back to the record only if no marker is
+    /// set.** Never rely on `get_intent == None` alone to conclude an intent is
+    /// unsettled; always call `status` or check the markers directly.
+    pub fn get_intent(env: Env, intent_hash: BytesN<32>) -> Option<IntentRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Intent(intent_hash))
+    }
+
+    /// Combined, authoritative intent status view (issue #29).
+    ///
+    /// Consults the durable idempotency markers first (they survive record
+    /// archival), then falls back to the live `IntentRecord`. Returns:
+    ///
+    /// - `IntentStatus::Filled` / `ConfirmationSent` — `Settled` marker is set;
+    ///   the intent was filled. (The record may already be archived.)
+    /// - `IntentStatus::Cancelled` — `Cancelled` marker is set.
+    /// - The `IntentRecord::status` value — if the record is still live and no
+    ///   terminal marker exists yet (e.g. `Locked`, `Filled` before dispatch).
+    /// - `None` — neither a marker nor a live record exists. The intent hash
+    ///   was never registered on this contract, or the record was archived
+    ///   before a terminal marker was written (should not occur under normal
+    ///   operation, but callers must handle it).
+    ///
+    /// **Integrators: always call `status` for terminal-state queries.** Do not
+    /// use `get_intent == None` as a proxy for "unknown or pending".
+    pub fn status(env: Env, intent_hash: BytesN<32>) -> Option<IntentStatus> {
+        let p = env.storage().persistent();
+        // Markers are the source of truth for terminal state — check them first.
+        if p.has(&DataKey::Settled(intent_hash.clone())) {
+            return Some(IntentStatus::ConfirmationSent);
+        }
+        if p.has(&DataKey::Cancelled(intent_hash.clone())) {
+            return Some(IntentStatus::Cancelled);
+        }
+        // Fall back to the live record for pre-terminal states.
+        p.get::<DataKey, IntentRecord>(&DataKey::Intent(intent_hash))
+            .map(|r| r.status)
+    }
+
+    /// Quote the LayerZero native fee required to dispatch an outbound message
+    /// to `dst_eid` (the source-chain EVM escrow). Solvers and keepers MUST
+    /// call this before `fill_intent` / `cancel_expired_intent` and pass the
+    /// returned value (with a small buffer for fee fluctuation) as `lz_fee`.
+    ///
+    /// Passing a `lz_fee` below the quoted amount will return
+    /// `InsufficientLzFee` from `dispatch`, before any irreversible effect
+    /// (token delivery or cancellation) is performed.
+    ///
+    /// The `message` parameter is a pre-encoded LayerZero payload. Passing a
+    /// zero-length message is valid for a rough worst-case estimate; the actual
+    /// fee depends on the encoded message length, which is fixed per message
+    /// type (FillConfirmed: 90 bytes, CancelIntent: 35 bytes).
+    pub fn quote_lz_fee(
+        env: Env,
+        dst_eid: u32,
+        message: soroban_sdk::Bytes,
+    ) -> Result<i128, PerihelionError> {
+        let receiver: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Peer(dst_eid))
+            .ok_or(PerihelionError::UntrustedPeer)?;
+        let endpoint = Self::require_endpoint(&env)?;
+        let params = MessagingParams {
+            dst_eid,
+            receiver,
+            message,
+        };
+        Ok(EndpointClient::new(&env, &endpoint).quote(&params))
+    }
+
+    /// Current trusted endpoint.
+    pub fn endpoint(env: Env) -> Result<Address, PerihelionError> {
+        Self::require_endpoint(&env)
+    }
+
+    /// Whether the contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Whether the given source-chain corridor is individually paused.
+    pub fn is_eid_paused(env: Env, eid: u32) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::PausedEid(eid))
+            .unwrap_or(false)
+    }
+
+    /// Current keeper reward in stroops, paid to callers of `cancel_expired_intent`.
+    /// Zero means the keeper incentive is disabled and refunds are self-serve only (issue #173).
+    pub fn keeper_reward(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::KeeperReward)
+            .unwrap_or(0)
+    }
+
+    /// PROPOSED Phase 3: Fetch aggregate reputation metrics for a solver.
+    /// Returns None if the solver has never filled an intent.
+    pub fn get_solver_reputation(env: Env, solver: Address) -> Option<SolverReputationRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SolverReputation(solver))
+    }
+}
+
+// --- Private helpers (not contract entrypoints) -------------------------------
+
+impl Perihelion {
+    fn require_admin(env: &Env) -> Result<Address, PerihelionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PerihelionError::NotInitialized)
+    }
+
+    fn require_endpoint(env: &Env) -> Result<Address, PerihelionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Endpoint)
+            .ok_or(PerihelionError::NotInitialized)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), PerihelionError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(PerihelionError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Check neither the global pause nor the per-eid corridor pause.
+    fn require_eid_not_paused(env: &Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_not_paused(env)?;
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::PausedEid(eid))
+            .unwrap_or(false)
+        {
+            return Err(PerihelionError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn is_finalized(env: &Env, intent_hash: &BytesN<32>) -> bool {
+        let p = env.storage().persistent();
+        p.has(&DataKey::Settled(intent_hash.clone()))
+            || p.has(&DataKey::Cancelled(intent_hash.clone()))
+    }
+
+    /// Accept a nonce exactly once, regardless of delivery order. Uses a bitmap to
+    /// track consumed nonces in a 64-nonce window (base, base+63]. If a nonce falls
+    /// outside the window, the base advances and the old bitmap is discarded, so
+    /// very old messages are still rejected (cannot replay messages more than ~64
+    /// messages old without an explicit reset). This implements true "unordered
+    /// delivery" semantics per LayerZero V2 lazy-nonce model.
+    ///
+    /// This is the **LayerZero transport nonce** guard. It prevents the same
+    /// LayerZero message from being replayed at the transport layer. It is distinct
+    /// from the `Intent.nonce` 256-bit random value in the EIP-712 payload, which
+    /// only prevents two identical intents from mapping to the same `intent_hash`
+    /// (collision prevention). The application-layer idempotency guarantee against
+    /// double-settle and double-cancel is provided by the `Settled` and `Cancelled`
+    /// persistent markers checked in `fill_intent` and `cancel_expired_intent`.
+    ///
+    /// See `docs/TECHNICAL-ARCHITECTURE.md §11` for the full anti-replay story.
+    fn accept_nonce(env: &Env, eid: u32, nonce: u64) -> Result<(), PerihelionError> {
+        if nonce == 0 {
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        let ps = env.storage().persistent();
+        let base_key = DataKey::InboundNonceBase(eid);
+        let bitmap_key = DataKey::InboundNonceBitmap(eid);
+
+        let base: u64 = ps.get(&base_key).unwrap_or(0);
+        let mut bitmap: u64 = ps.get(&bitmap_key).unwrap_or(0);
+
+        // If nonce <= base, it was already processed (or too old).
+        if nonce <= base {
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        // If nonce > base + 64, advance the window.
+        if nonce > base + 64 {
+            let new_base = nonce - 1;
+            ps.set(&base_key, &new_base);
+            ps.set(&bitmap_key, &1u64); // Only the new nonce is set in the bitmap.
+                                        // Replay-safety invariant: archival of either entry resets the
+                                        // high-water mark to zero, re-opening previously consumed nonces.
+            ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
+            ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
+            return Ok(());
+        }
+
+        // Nonce is in the current window: [base + 1, base + 64].
+        let offset = (nonce - base - 1) as u32;
+        let bit = 1u64 << offset;
+
+        if bitmap & bit != 0 {
+            // Already consumed.
+            return Err(PerihelionError::StaleNonce);
+        }
+
+        bitmap |= bit;
+        // Write base explicitly so extend_ttl can always find the key in storage.
+        ps.set(&base_key, &base);
+        ps.set(&bitmap_key, &bitmap);
+        // Replay-safety invariant: archival of either entry resets the
+        // high-water mark to zero, re-opening previously consumed nonces.
+        ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
+        ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
+        Ok(())
+    }
+
+    /// Check per-intent and rolling-window value caps. Reverts if exceeded.
+    fn enforce_value_caps(env: &Env, amount: i128) -> Result<(), PerihelionError> {
+        let storage = env.storage().instance();
+
+        // Check 1: Per-intent maximum
+        if let Some(max_amount) = storage.get::<DataKey, i128>(&DataKey::MaxIntentAmount) {
+            if max_amount > 0 && amount > max_amount {
+                return Err(PerihelionError::ExceedsMaxIntentAmount);
+            }
+        }
+
+        // Check 2: Rolling-window cap (disabled if duration is zero)
+        if let Some(duration) = storage.get::<DataKey, u64>(&DataKey::RollingWindowDuration) {
+            if duration > 0 {
+                if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
+                    if cap > 0 {
+                        // Reject if cap has already been triggered.
+                        if let Some(true) =
+                            storage.get::<DataKey, bool>(&DataKey::RollingWindowTriggered)
+                        {
+                            return Err(PerihelionError::RollingWindowCapTriggered);
+                        }
+
+                        // Calculate current window start. Each window spans [windowStart, windowStart + duration).
+                        let now = env.ledger().timestamp();
+                        let window_start = (now / duration) * duration;
+
+                        // Advance memoized window if time has moved to a new bucket.
+                        let latest_window_start = storage
+                            .get::<DataKey, u64>(&DataKey::LatestWindowStart)
+                            .unwrap_or(0);
+                        if window_start > latest_window_start {
+                            storage.set(&DataKey::LatestWindowStart, &window_start);
+                            // In a new window; prior bucket is abandoned. Restart accumulator.
+                            if let Some(prev_start) = latest_window_start.checked_sub(duration) {
+                                storage.remove(&DataKey::RollingWindowBucket(prev_start));
+                            }
+                        }
+
+                        // Accumulate this intent's amount into the current window.
+                        let accumulated = storage
+                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
+                            .unwrap_or(0)
+                            .checked_add(amount)
+                            .ok_or(PerihelionError::ArithmeticError)?;
+
+                        if accumulated > cap {
+                            // Cap exceeded: trigger halt and record the window for diagnostics.
+                            storage.set(&DataKey::RollingWindowTriggered, &true);
+                            storage.set(
+                                &DataKey::RollingWindowResetEarliestAt,
+                                &now.checked_add(duration)
+                                    .ok_or(PerihelionError::ArithmeticError)?,
+                            );
+                            env.events().publish(
+                                (Symbol::new(env, "rolling_window_cap_triggered"),),
+                                (window_start, accumulated),
+                            );
+                            return Err(PerihelionError::RollingWindowCapExceeded);
+                        }
+
+                        // Update the bucket.
+                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_fill_instruction(
+        env: &Env,
+        transport_src_eid: u32,
+        fi: FillInstruction,
+    ) -> Result<(), PerihelionError> {
+        // The intent's return-path eid must equal the transport-authenticated
+        // origin eid. If they differ, a compromised or misconfigured adapter
+        // could declare a different src_eid in the body and route the eventual
+        // FillConfirmed/CancelIntent to a different chain than the one that
+        // actually locked the funds. We override fi.src_eid with the transport
+        // value rather than just asserting-equal so that adapters are not
+        // required to populate the field (they may leave it zero); the
+        // authoritative value is always the transport origin.
+        let key = DataKey::Intent(fi.intent_hash.clone());
+        // Idempotent: ignore re-delivery of a known or finalized intent.
+        if Self::is_finalized(env, &fi.intent_hash) || env.storage().persistent().has(&key) {
+            return Ok(());
+        }
+        if fi.min_dest_amount <= 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        // Reject deadlines that are unreasonably far in the future. This bounds
+        // per-intent TTL to a realistic settlement window and prevents cheap
+        // state-bloat attacks that pin MAX_TTL entries via far-future deadlines.
+        let now = env.ledger().timestamp();
+        if fi.deadline > now.saturating_add(MAX_DEADLINE_HORIZON) {
+            return Err(PerihelionError::DeadlineTooFar);
+        }
+
+        // Issue #15: verify that a peer is configured for fi.src_eid BEFORE
+        // registering the intent. If no peer exists for this eid, dispatch
+        // (FillConfirmed / CancelIntent) will fail at settlement time with
+        // UntrustedPeer, permanently stranding the intent. Rejecting here
+        // surfaces the operator misconfiguration early and prevents stranding.
+        //
+        // Peer symmetry note: `DataKey::Peer(src_eid)` is the same entry used
+        // by both inbound validation (lz_receive checks origin.sender against
+        // Peer(origin.src_eid)) and outbound dispatch (dispatch looks up
+        // Peer(rec.src_eid) to find the EVM escrow receiver). This is intentional
+        // and documented in set_peer above.
+        //
+        // Note on the two distinct src_eid values:
+        // - `origin.src_eid` (LayerZero transport source): the eid of the chain
+        //   that sent this LayerZero message. Already validated by lz_receive
+        //   against the registered peer before we arrive here.
+        // - `fi.src_eid` (intent source eid): the eid embedded inside the
+        //   FillInstruction payload, identifying which chain holds the locked
+        //   funds. For well-formed messages from a compliant EVM escrow these
+        //   two values are always equal (the escrow sets fi.src_eid = stellarEid
+        //   which is the Stellar endpoint id, NOT its own eid; see the EVM codec).
+        //   In practice the two are the same on all known deployments, but we
+        //   guard on fi.src_eid here because that is what dispatch uses at
+        //   settlement time.
+        if !env.storage().instance().has(&DataKey::Peer(fi.src_eid)) {
+            return Err(PerihelionError::UntrustedPeer);
+        }
+
+        // Check value caps before registering the intent.
+        Self::enforce_value_caps(&env, fi.min_dest_amount)?;
+
+        let rec = IntentRecord {
+            intent_hash: fi.intent_hash.clone(),
+            // Use transport_src_eid (authenticated) instead of fi.src_eid (body-declared).
+            src_eid: transport_src_eid,
+            recipient: fi.recipient,
+            dest_asset: fi.dest_asset,
+            min_dest_amount: fi.min_dest_amount,
+            deadline: fi.deadline,
+            preferred_solver: fi.preferred_solver,
+            reservation_expires: if fi.reservation_window > 0 {
+                env.ledger()
+                    .timestamp()
+                    .saturating_add(fi.reservation_window)
+            } else {
+                fi.deadline
+            },
+            status: IntentStatus::Locked,
+            solver: None,
+            solver_evm: None,
+            fill_amount: 0,
+            fill_ledger: 0,
+        };
+        env.storage().persistent().set(&key, &rec);
+        let bump = Self::ttl_for_deadline(env, fi.deadline);
+        env.storage().persistent().extend_ttl(&key, bump / 2, bump);
+
+        env.events().publish(
+            (Symbol::new(env, "registered"), fi.intent_hash),
+            (transport_src_eid, fi.deadline),
+        );
+        Ok(())
+    }
+
+    fn on_cancel_inbound(env: &Env, ci: CancelInstruction) -> Result<(), PerihelionError> {
+        if Self::is_finalized(env, &ci.intent_hash) {
+            // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
+            // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
+            env.events().publish(
+                (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                (IntentStatus::ConfirmationSent as u32,),
+            );
+            return Ok(());
+        }
+        let key = DataKey::Intent(ci.intent_hash.clone());
+        if let Some(mut rec) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, IntentRecord>(&key)
+        {
+            if rec.status == IntentStatus::Locked {
+                rec.status = IntentStatus::Cancelled;
+                env.storage().persistent().set(&key, &rec);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
+                env.storage().persistent().extend_ttl(
+                    &DataKey::Cancelled(ci.intent_hash.clone()),
+                    MAX_TTL / 2,
+                    MAX_TTL,
+                );
+                env.events().publish(
+                    (
+                        Symbol::new(env, "cancelled_inbound"),
+                        ci.intent_hash.clone(),
+                    ),
+                    (rec.src_eid,),
+                );
+            } else {
+                // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
+                // Emit cancel_ignored event to record the race.
+                env.events().publish(
+                    (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                    (rec.status as u32,),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn send_fill_confirmed(
+        env: &Env,
+        payer: &Address,
+        rec: &IntentRecord,
+        solver_evm: &BytesN<32>,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        let message = encode_fill_confirmed(
+            env,
+            &rec.intent_hash,
+            solver_evm,
+            rec.fill_amount,
+            rec.fill_ledger,
+        );
+        Self::dispatch(env, payer, rec.src_eid, message, lz_fee)
+    }
+
+    fn send_cancel(
+        env: &Env,
+        payer: &Address,
+        rec: &IntentRecord,
+        reason: u8,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        let message = encode_cancel_intent(env, &rec.intent_hash, reason);
+        Self::dispatch(env, payer, rec.src_eid, message, lz_fee)
+    }
+
+    /// PROPOSED Phase 3: Update solver reputation metrics after a successful fill.
+    /// Called when a fill transitions to ConfirmationSent state.
+    /// Updates fill_count, success_count, and EWMA latency (0.9 * old + 0.1 * new).
+    fn update_solver_reputation(
+        env: &Env,
+        solver: &Address,
+        fill_latency_ledgers: u32,
+    ) -> Result<(), PerihelionError> {
+        let key = DataKey::SolverReputation(solver.clone());
+        let mut rep: SolverReputationRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(SolverReputationRecord {
+                    fill_count: 0,
+                    success_count: 0,
+                    ewma_latency: 0,
+                });
+
+        rep.fill_count = rep.fill_count.saturating_add(1);
+        rep.success_count = rep.success_count.saturating_add(1);
+
+        let latency_i128 = fill_latency_ledgers as i128;
+        if rep.ewma_latency == 0 {
+            rep.ewma_latency = latency_i128;
+        } else {
+            rep.ewma_latency = (rep.ewma_latency * 9 + latency_i128) / 10;
+        }
+
+        env.storage().persistent().set(&key, &rep);
+        Ok(())
+    }
+
+    fn dispatch(
+        env: &Env,
+        payer: &Address,
+        dst_eid: u32,
+        message: soroban_sdk::Bytes,
+        lz_fee: i128,
+    ) -> Result<(), PerihelionError> {
+        let receiver: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Peer(dst_eid))
+            .ok_or(PerihelionError::UntrustedPeer)?;
+        let endpoint = Self::require_endpoint(env)?;
+        let params = MessagingParams {
+            dst_eid,
+            receiver,
+            message,
+        };
+        // Pre-check: quote the required fee and reject early if underpaid.
+        // This surfaces fee estimation failures as InsufficientLzFee rather
+        // than an opaque revert from inside the endpoint, enabling solver
+        // operators to distinguish underpayment from other dispatch errors.
+        let required = EndpointClient::new(env, &endpoint).quote(&params);
+        if lz_fee < required {
+            return Err(PerihelionError::InsufficientLzFee);
+        }
+        EndpointClient::new(env, &endpoint).send(&params, payer, &lz_fee);
+        Ok(())
+    }
+
+    /// TTL bump target covering `deadline + GRACE`, clamped to `MAX_TTL`.
+    ///
+    /// Divides by `MIN_SECS_PER_LEDGER` (4 s) to over-provision the ledger
+    /// count when actual close times are longer. This is the safe direction:
+    /// a too-generous TTL wastes a small amount of rent but an under-estimate
+    /// can archive the entry before the deadline passes.
+    ///
+    /// The division and `.min(MAX_TTL as u64)` clamp are performed in `u64`
+    /// **before** the cast to `u32` (issue #30). A plain `as u32` on a `u64`
+    /// value exceeding `u32::MAX` wraps modulo 2^32, producing a deceptively
+    /// small TTL for a far-future deadline. By clamping first we guarantee the
+    /// value is provably in `[0, MAX_TTL]` when narrowed.
+    fn ttl_for_deadline(env: &Env, deadline: u64) -> u32 {
+        let now = env.ledger().timestamp();
+        let secs = deadline.saturating_sub(now);
+        let ledgers_u64 = (secs / MIN_SECS_PER_LEDGER)
+            .saturating_add(GRACE_LEDGERS as u64)
+            .min(MAX_TTL as u64);
+        // Safe: value is in [0, MAX_TTL] ⊆ [0, u32::MAX].
+        ledgers_u64 as u32
+    }
+}
