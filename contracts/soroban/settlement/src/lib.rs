@@ -377,6 +377,87 @@ impl Perihelion {
         Ok(())
     }
 
+    /// Set the per-intent maximum amount (value cap). Admin-only.
+    /// Rejects any intent with min_dest_amount > max_amount. Set to 0 to disable.
+    /// Issue #286: This cap is applied to the destination asset amount on Stellar
+    /// (denominated in 7 decimals for Stellar assets).
+    ///
+    /// Emits `max_intent_amount_set(max_amount)` event.
+    pub fn set_max_intent_amount(env: Env, max_amount: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if max_amount < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxIntentAmount, &max_amount);
+        env.events().publish(
+            (Symbol::new(&env, "max_intent_amount_set"),),
+            (max_amount,),
+        );
+        Ok(())
+    }
+
+    /// Set the rolling-window value cap. Admin-only.
+    /// Aggregates min_dest_amount across all intents registered within each duration window.
+    /// If the cumulative amount exceeds cap, the rolling-window breach is triggered.
+    /// Issue #286: This cap is applied to the destination asset amount on Stellar.
+    ///
+    /// # Parameters
+    /// - `duration`: rolling window size in seconds (0 to disable)
+    /// - `cap`: maximum aggregate amount per window (0 to disable)
+    ///
+    /// Emits `rolling_window_cap_set(duration, cap)` event.
+    pub fn set_rolling_window_cap(env: Env, duration: u64, cap: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if cap < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowDuration, &duration);
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowCap, &cap);
+        env.events().publish(
+            (Symbol::new(&env, "rolling_window_cap_set"),),
+            (duration, cap),
+        );
+        Ok(())
+    }
+
+    /// Reset the triggered rolling-window cap to allow new intents. Admin-only.
+    /// Must be called at or after RollingWindowResetEarliestAt to unblock registration.
+    /// Issue #286: Mirrors the EVM's resetRollingWindowCap behavior.
+    ///
+    /// Emits `rolling_window_cap_reset()` event.
+    pub fn reset_rolling_window_cap(env: Env) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        let now = env.ledger().timestamp();
+        if let Some(reset_at) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::RollingWindowResetEarliestAt)
+        {
+            if now < reset_at {
+                return Err(PerihelionError::DeadlineNotPassed);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowTriggered, &false);
+        env.storage()
+            .instance()
+            .remove(&DataKey::RollingWindowResetEarliestAt);
+        env.events().publish(
+            (Symbol::new(&env, "rolling_window_cap_reset"),),
+            (),
+        );
+        Ok(())
+    }
+
     /// Set the native token (SAC) address. Admin-only. Required for keeper reward
     /// payouts. The address differs per network (Testnet, Futurenet, Pubnet).
     /// Issue #173.
@@ -917,6 +998,46 @@ impl Perihelion {
             .instance()
             .get(&DataKey::KeeperReward)
             .unwrap_or(0)
+    }
+
+    /// Get the per-intent maximum amount cap. Returns 0 if unlimited (issue #286).
+    pub fn get_max_intent_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxIntentAmount)
+            .unwrap_or(0)
+    }
+
+    /// Get the rolling-window duration in seconds. Returns 0 if disabled (issue #286).
+    pub fn get_rolling_window_duration(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowDuration)
+            .unwrap_or(0)
+    }
+
+    /// Get the rolling-window cap. Returns 0 if unlimited (issue #286).
+    pub fn get_rolling_window_cap(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowCap)
+            .unwrap_or(0)
+    }
+
+    /// Check if the rolling-window cap has been triggered. Returns true if breached (issue #286).
+    pub fn is_rolling_window_cap_triggered(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowTriggered)
+            .unwrap_or(false)
+    }
+
+    /// Get the earliest timestamp at which the rolling-window cap can be reset.
+    /// Returns None if not triggered (issue #286).
+    pub fn get_rolling_window_reset_earliest_at(env: Env) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowResetEarliestAt)
     }
 
     /// PROPOSED Phase 3: Fetch aggregate reputation metrics for a solver.
