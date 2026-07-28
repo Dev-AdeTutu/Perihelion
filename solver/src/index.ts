@@ -17,11 +17,12 @@ import { createServer } from "node:http";
 async function main(): Promise<void> {
   const config = loadConfig();
   const executorConfig = loadExecutorConfig();
-  const executor = new Executor(executorConfig);
   const metrics = new SolverMetrics();
 
   // Structured JSON logger — replaces console for production-grade output.
   const log = createLogger();
+
+  const executor = new Executor(executorConfig, log);
 
   const solver = new Solver(config, executor, log, metrics);
 
