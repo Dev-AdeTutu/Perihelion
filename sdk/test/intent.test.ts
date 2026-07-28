@@ -9,9 +9,12 @@ import {
   hashIntent,
   I128_MAX,
   IntentValidationError,
+  MAX_DESTINATION_LEN,
+  MAX_DEST_ASSET_LEN,
   perihelionDomain,
   U128_MAX,
   validateAmount,
+  validateIntent,
   verifyIntent,
 } from "../src/intent.js";
 import { PerihelionClient } from "../src/client.js";
@@ -317,5 +320,86 @@ test("buildIntent accepts minDestAmount = i128::MAX (exact boundary)", () => {
       },
       { suppressWarning: true }
     )
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Issue #298 — Length bound enforcement
+// ---------------------------------------------------------------------------
+
+test("SDK constants match contract bounds", () => {
+  // PerihelionEscrow.sol defines MAX_DESTINATION_LEN = 56 and MAX_DEST_ASSET_LEN = 69.
+  // These values must match the SDK's exported constants to ensure consistent validation.
+  assert.equal(MAX_DESTINATION_LEN, 56);
+  assert.equal(MAX_DEST_ASSET_LEN, 69);
+});
+
+test("validateIntent enforces MAX_DESTINATION_LEN byte limit", () => {
+  // Valid G... strkey is exactly 56 ASCII bytes and should pass.
+  assert.doesNotThrow(() =>
+    validateIntent({
+      user: account.address,
+      destination: VALID_DESTINATION, // 56 ASCII bytes
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      minDestAmount: "900000",
+      deadline: 4102444800,
+    })
+  );
+});
+
+test("validateIntent rejects destination exceeding MAX_DESTINATION_LEN", () => {
+  // A non-ASCII character (e.g. emoji) takes 4 UTF-8 bytes, causing overflow.
+  const oversizedDestination = VALID_DESTINATION + "💀"; // 56 + 4 = 60 bytes
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: oversizedDestination,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: "900000",
+        deadline: 4102444800,
+      }),
+    IntentValidationError
+  );
+});
+
+test("validateIntent enforces MAX_DEST_ASSET_LEN byte limit", () => {
+  // Valid destAsset is at most 69 ASCII bytes and should pass.
+  assert.doesNotThrow(() =>
+    validateIntent({
+      user: account.address,
+      destination: VALID_DESTINATION,
+      sourceChainId: 8453,
+      sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      sourceAmount: "1000000",
+      destAsset: VALID_DEST_ASSET, // 69 ASCII bytes (12 + 1 + 56)
+      minDestAmount: "900000",
+      deadline: 4102444800,
+    })
+  );
+});
+
+test("validateIntent rejects destAsset exceeding MAX_DEST_ASSET_LEN", () => {
+  // A non-ASCII character in the code causes overflow.
+  const oversizedAsset = "X".repeat(12) + ":" + VALID_DESTINATION + "💀"; // 12 + 1 + 56 + 4 = 73 bytes
+  assert.throws(
+    () =>
+      validateIntent({
+        user: account.address,
+        destination: VALID_DESTINATION,
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: oversizedAsset,
+        minDestAmount: "900000",
+        deadline: 4102444800,
+      }),
+    IntentValidationError
   );
 });

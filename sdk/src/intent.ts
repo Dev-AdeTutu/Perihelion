@@ -97,6 +97,15 @@ export function validateIntent(
       `must be a valid Stellar strkey starting with G or C, 56 chars of A-Z/2-7 (got '${params.destination}')`,
     );
   }
+  // Enforce byte-length bounds as defence-in-depth, independent of regex.
+  // Bounds are measured in UTF-8 bytes, matching the contract's bytes(intent.destination).length.
+  const destBytes = new TextEncoder().encode(params.destination).length;
+  if (destBytes > MAX_DESTINATION_LEN) {
+    throw new IntentValidationError(
+      "destination",
+      `exceeds ${MAX_DESTINATION_LEN} bytes (got ${destBytes} bytes)`,
+    );
+  }
   if (!Number.isInteger(params.sourceChainId) || params.sourceChainId <= 0) {
     throw new IntentValidationError(
       "sourceChainId",
@@ -119,6 +128,14 @@ export function validateIntent(
     throw new IntentValidationError(
       "destAsset",
       `must be 'native' or '<CODE>:<G...ISSUER>' (got '${params.destAsset}')`,
+    );
+  }
+  // Enforce byte-length bound on destAsset as defence-in-depth, independent of regex.
+  const destAssetBytes = new TextEncoder().encode(params.destAsset).length;
+  if (destAssetBytes > MAX_DEST_ASSET_LEN) {
+    throw new IntentValidationError(
+      "destAsset",
+      `exceeds ${MAX_DEST_ASSET_LEN} bytes (got ${destAssetBytes} bytes)`,
     );
   }
   if (!isNonNegIntString(params.minDestAmount)) {
