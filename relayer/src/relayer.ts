@@ -56,12 +56,17 @@ export interface SourceWatcher {
    * `headHash` is the block hash of `head`; `parentHash` is the parent of
    * `head`.  Both are used for reorg detection.  Implementations that cannot
    * supply them may omit these fields; reorg detection is then disabled.
+   *
+   * `blockHeaders` (optional) provides block records for intermediate blocks
+   * in the scanned range (fromBlock through head). If supplied, the relayer
+   * records all of them for deeper reorg detection.
    */
   poll(fromBlock: number): Promise<{
     messages: PendingMessage[];
     head: number;
     headHash?: string;
     parentHash?: string;
+    blockHeaders?: Array<{ number: number; hash: string; parentHash: string }>;
   }>;
 }
 
@@ -261,7 +266,7 @@ export class Relayer {
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
-    const { messages, head, headHash, parentHash } = await this.watcher.poll(this.cursor);
+    const { messages, head, headHash, parentHash, blockHeaders } = await this.watcher.poll(this.cursor);
 
     // Reorg detection — only when the watcher provides block hashes.
     if (headHash !== undefined && parentHash !== undefined) {
@@ -283,6 +288,12 @@ export class Relayer {
           // Roll back cursor to re-process the reorged blocks.
           this.cursor = Math.max(this.startBlock, head - reorgDepth);
           this.readiness.cursor = this.cursor;
+        }
+      }
+      // Record intermediate block headers if provided.
+      if (blockHeaders) {
+        for (const block of blockHeaders) {
+          this.recordBlock(block);
         }
       }
       this.recordBlock({ number: head, hash: headHash, parentHash });

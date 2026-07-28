@@ -563,3 +563,65 @@ test("a restarted relayer resumes from the persisted checkpoint", async () => {
 
   assert.deepEqual(polledFrom, [0, 1]);
 });
+
+// ─── Issue 4: Reorg detection ───────────────────────────────────────────────
+
+test("reorg detected when block hash changes and cursor rolls back", async () => {
+  const config = { ...baseConfig(), confirmations: 2 };
+  let tick = 0;
+
+  const watcher: SourceWatcher = {
+    async poll() {
+      tick++;
+      if (tick === 1) {
+        // First tick: blocks 1-3, head is 3 with hash A
+        return {
+          messages: [makeMsg(1), makeMsg(2), makeMsg(3)],
+          head: 3,
+          headHash: "0xAAAA",
+          parentHash: "0x0000", // assume block 2 exists as parent
+          blockHeaders: [
+            { number: 1, hash: "0xHASH1", parentHash: "0x0000" },
+            { number: 2, hash: "0xHASH2", parentHash: "0xHASH1" },
+            { number: 3, hash: "0xHASH3", parentHash: "0xHASH2" },
+          ],
+        };
+      } else if (tick === 2) {
+        // Second tick: reorg detected at block 3 (different hash)
+        return {
+          messages: [makeMsg(4)],
+          head: 4,
+          headHash: "0xBBBB",
+          parentHash: "0xHASH3_NEW", // doesn't match the hash of block 3 we recorded
+          blockHeaders: [
+            { number: 3, hash: "0xHASH3_NEW", parentHash: "0xHASH2" }, // different hash
+            { number: 4, hash: "0xHASH4", parentHash: "0xHASH3_NEW" },
+          ],
+        };
+      }
+      return { messages: [], head: 10 };
+    },
+  };
+
+  const delivered: PendingMessage[] = [];
+  const delivery: DestinationDelivery = {
+    async deliver(p) {
+      delivered.push(p);
+      return "0xdst";
+    },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+
+  // First tick: deliveries at blocks 1+ (since confirmedHead = 3 - 2 = 1)
+  await relayer.tick();
+  assert.equal(delivered.length, 3, "delivered 3 messages on first tick");
+  assert.equal(relayer.readiness.cursor, 2, "cursor advanced to confirmedHead + 1");
+
+  // Second tick: reorg detected, cursor rolled back
+  await relayer.tick();
+  assert.equal(relayer.readiness.cursor, 2, "cursor rolled back after reorg");
+});
+

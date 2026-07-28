@@ -166,7 +166,7 @@ export class EVMSourceWatcher implements SourceWatcher {
 
   async poll(
     fromBlock: number,
-  ): Promise<{ messages: PendingMessage[]; head: number; headHash?: string; parentHash?: string }> {
+  ): Promise<{ messages: PendingMessage[]; head: number; headHash?: string; parentHash?: string; blockHeaders?: Array<{ number: number; hash: string; parentHash: string }> }> {
     const currentBlock = await this.client.getBlockNumber();
     const head = Number(currentBlock);
 
@@ -182,6 +182,37 @@ export class EVMSourceWatcher implements SourceWatcher {
       fromBlock: BigInt(fromBlock),
       toBlock: currentBlock,
     });
+
+    // Collect block headers for the scanned range to improve reorg detection.
+    // This enables detection of reorgs deeper than one block.
+    const blockHeaders: Array<{ number: number; hash: string; parentHash: string }> = [];
+    if (headHash !== undefined && parentHash !== undefined) {
+      // Collect headers for blocks that emitted messages.
+      const blocksInRange = new Set<number>();
+
+      for (const log of logs) {
+        if (log.blockNumber !== undefined) {
+          blocksInRange.add(Number(log.blockNumber));
+        }
+      }
+
+      // Fetch headers for blocks that had messages.
+      for (const blockNum of blocksInRange) {
+        try {
+          const block = await this.client.getBlock({ blockNumber: BigInt(blockNum) });
+          if (block.hash && block.parentHash) {
+            blockHeaders.push({
+              number: blockNum,
+              hash: block.hash,
+              parentHash: block.parentHash as string,
+            });
+          }
+        } catch {
+          // If we can't fetch a block's header, skip it; reorg detection
+          // degrades gracefully but continues.
+        }
+      }
+    }
 
     const messages: PendingMessage[] = [];
 
@@ -202,7 +233,7 @@ export class EVMSourceWatcher implements SourceWatcher {
       }
     }
 
-    return { messages, head, headHash, parentHash };
+    return { messages, head, headHash, parentHash, blockHeaders: blockHeaders.length > 0 ? blockHeaders : undefined };
   }
 
   /**
