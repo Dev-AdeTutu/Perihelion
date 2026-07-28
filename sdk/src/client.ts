@@ -126,7 +126,8 @@ export class PerihelionClient {
     if (!res.ok) {
       throw new PerihelionHttpError("listPending", res.status, await res.text());
     }
-    return parseIntentRecordArray(await res.json());
+    const body = (await res.json()) as { records?: unknown };
+    return parseIntentRecordArray(body.records);
   }
 
   /**

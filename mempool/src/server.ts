@@ -14,6 +14,10 @@ export interface MempoolServerOptions {
   verifyingContract?: Address;
 }
 
+const DEFAULT_LIST_LIMIT = 100;
+const MAX_LIST_LIMIT = 1000;
+const SWEEP_INTERVAL_MS = 30_000;
+
 export class MempoolServer {
   private app = express();
   private store = new IntentStore();
@@ -21,6 +25,7 @@ export class MempoolServer {
   private host: string;
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
+  private sweepTimer?: ReturnType<typeof setInterval>;
 
   constructor(opts: MempoolServerOptions = {}) {
     this.port = opts.port ?? 3000;
@@ -85,18 +90,27 @@ export class MempoolServer {
   }
 
   private handleListIntents(req: Request, res: Response): void {
-    const { status } = req.query as { status?: IntentStatus };
+    const { status, cursor } = req.query as { status?: IntentStatus; cursor?: string };
+    const limitParam = Number(req.query.limit);
+    const limit = Number.isInteger(limitParam) && limitParam > 0
+      ? Math.min(limitParam, MAX_LIST_LIMIT)
+      : DEFAULT_LIST_LIMIT;
 
-    let records = this.store.all();
-    if (status) {
-      records = records.filter((r) => r.status === status);
-    }
+    const records = this.store.all(status);
+    const startIndex = cursor ? records.findIndex((r) => r.hash === cursor) + 1 : 0;
+    const page = records.slice(startIndex, startIndex + limit);
+    const nextCursor = startIndex + limit < records.length ? page[page.length - 1]?.hash : undefined;
 
-    res.json(records);
+    res.json({ records: page, nextCursor });
   }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
+      console.warn(
+        "Mempool store is in-memory only: pending intents are lost on restart.",
+      );
+      this.sweepTimer = setInterval(() => this.store.evictExpired(), SWEEP_INTERVAL_MS);
+      this.sweepTimer.unref?.();
       this.server = this.app.listen(this.port, this.host, () => {
         console.log(`Mempool server listening on http://${this.host}:${this.port}`);
         resolve();
@@ -107,6 +121,10 @@ export class MempoolServer {
   /** Stop the HTTP listener. Resolves once the server has closed. */
   stop(): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (this.sweepTimer) {
+        clearInterval(this.sweepTimer);
+        this.sweepTimer = undefined;
+      }
       if (!this.server) {
         resolve();
         return;
