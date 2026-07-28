@@ -3,6 +3,9 @@ openapi: 3.1.0
 info:
   title: Perihelion Mempool API
   version: 1.0.0
+  contact:
+    name: Perihelion Protocol
+    url: https://github.com/Perihelion-Protocol/Perihelion
   description: |
     The Perihelion Mempool API is the HTTP surface through which clients
     submit signed intents, query their lifecycle status, and list intents
@@ -10,7 +13,8 @@ info:
 
     ## Intent lifecycle
 
-    An intent moves through the following states after submission:
+    The full cross-chain intent lifecycle (as modeled by the SDK and the
+    on-chain contracts) has six states:
 
     ```
     pending → claimed → settling → settled
@@ -27,18 +31,46 @@ info:
     | `refunded` | Solver-initiated refund after a failed or cancelled fill     |
     | `expired`  | Deadline passed before any solver claimed the intent         |
 
+    **This mempool's `IntentStatus` only covers four of those six states:**
+    `pending`, `settled`, `refunded`, `expired`. `claimed` and `settling` are
+    part of the broader on-chain/SDK lifecycle but are never assigned by this
+    reference implementation — solvers and the relayer currently track those
+    intermediate states out-of-band. Tracked by issue #294 (SDK rejects the
+    mempool's `IntentRecord` shape) and issue #321 (no endpoint mutates
+    status at all, see "Status ownership" below).
+
+    ## Status ownership
+
+    No endpoint in this API transitions an intent's status. The reference
+    `MempoolServer` exposes an in-process `updateStatus(hash, status)` method
+    used by test harnesses and local relayer/solver wiring, but it is **not**
+    reachable over HTTP — there is currently no documented or authenticated
+    way for a solver or relayer to report progress via this API. Tracked by
+    issue #321.
+
     ## Pagination
 
-    The current implementation returns **all** matching records in a single
-    response. Future versions may introduce cursor-based pagination via
-    `after` / `limit` query parameters; clients should be prepared for the
-    response shape to gain a top-level `nextCursor` field while the `items`
-    array remains backward-compatible.
+    `GET /intents` accepts optional `limit` and `offset` query parameters.
+    When neither is supplied, the endpoint preserves its original behavior of
+    returning every matching record in a single array response. When
+    supplied, the response is the same flat `IntentRecord[]` array, sliced to
+    the requested page — there is no envelope object and no total count.
 
     ## Error responses
 
     All error responses share the shape `{ "error": "<message>" }` and use
     standard HTTP status codes.
+
+    **Known gaps** (each tracked by its own issue, not yet part of this
+    contract):
+    - Duplicate submission: `POST /intents` currently overwrites the existing
+      record for a hash that has already been submitted (last write wins) and
+      returns `200`, rather than rejecting the second submission with `409`.
+      Tracked by issue #320.
+    - Malformed `:hash` path parameter: `GET /intents/{hash}` performs no
+      format validation on the path parameter; any string is accepted and a
+      value that does not match a stored record simply falls through to the
+      documented `404`. Tracked by issue #348.
 
 servers:
   - url: http://localhost:3000
@@ -47,6 +79,8 @@ servers:
 tags:
   - name: Intents
     description: Submit and query cross-chain bridge intents
+  - name: Discovery
+    description: Server metadata and EIP-712 domain discovery
 
 paths:
 
@@ -60,9 +94,14 @@ paths:
         Validates the EIP-712 signature over the intent, computes the canonical
         `intent_hash`, and stores the record with status `pending`.
 
-        The server rejects the submission if the signature is invalid, any
-        required field is missing, or the intent hash already exists in the
-        mempool (409 Conflict).
+        The server rejects the submission if the signature is invalid or any
+        required field is missing (`400`).
+
+        **Duplicate submissions are not currently rejected.** If an intent
+        with the same hash has already been submitted, this call overwrites
+        the stored record (last write wins) and still returns `200`. A
+        strict `409 Conflict` check is tracked separately by issue #320 and
+        is not yet part of this contract.
       requestBody:
         required: true
         content:
@@ -79,13 +118,16 @@ paths:
                 destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
                 minDestAmount: "9900000"
                 deadline: 1751280000
-                nonce: "0x000000000000000000000000000000000000000000000000000000006842fc00"
+                nonce: "95395590780195993686340100862393633005949636859136019347794446361576576451305"
                 preferredSolver: "0x0000000000000000000000000000000000000000"
               signature: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab1c"
               hash: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
       responses:
         '200':
-          description: Intent accepted and stored; returns the canonical intent hash.
+          description: |
+            Intent accepted and stored; returns the canonical intent hash.
+            Also returned when overwriting a prior submission with the same
+            hash (see the duplicate-submission note above).
           content:
             application/json:
               schema:
@@ -109,15 +151,6 @@ paths:
                   summary: Invalid EIP-712 signature
                   value:
                     error: "Invalid signature"
-        '409':
-          description: |
-            Conflict — an intent with this hash already exists in the mempool.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: "Intent already exists"
         '500':
           description: Unexpected server error.
           content:
@@ -130,23 +163,50 @@ paths:
     get:
       operationId: listIntents
       tags: [Intents]
-      summary: List intents, optionally filtered by status
+      summary: List intents, optionally filtered by status and/or chain
       description: |
-        Returns all intent records in the mempool. Pass the optional `status`
-        query parameter to filter to a single lifecycle state.
-
-        **Pagination note:** the current implementation returns all matching
-        records in one response. Future versions may add cursor-based
-        pagination.
+        Returns intent records in the mempool. All query parameters are
+        optional and may be combined; results are filtered first, then
+        paginated.
       parameters:
         - name: status
           in: query
           required: false
           description: |
             Filter results to intents in this lifecycle state. When omitted,
-            all intents are returned regardless of status.
+            intents in any status are returned. An unrecognized value
+            returns `400`.
           schema:
             $ref: '#/components/schemas/IntentStatus'
+        - name: chainId
+          in: query
+          required: false
+          description: |
+            Filter results to intents whose `intent.sourceChainId` equals
+            this value. Useful for a mempool instance that may see intents
+            destined for more than one source chain's escrow.
+          schema:
+            type: integer
+          example: 8453
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Maximum number of records to return, applied after filtering and
+            after `offset`. Omit to return every remaining matching record.
+          schema:
+            type: integer
+            minimum: 0
+        - name: offset
+          in: query
+          required: false
+          description: |
+            Number of matching records to skip before collecting `limit`
+            results. Defaults to `0`.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
       responses:
         '200':
           description: Array of intent records (may be empty).
@@ -156,6 +216,14 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/IntentRecord'
+        '400':
+          description: The `status` query parameter is not a recognized `IntentStatus` value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Invalid status filter: 'bogus' (expected one of pending, settled, refunded, expired)"
 
   /intents/{hash}:
 
@@ -167,6 +235,11 @@ paths:
         Retrieves the full `IntentRecord` for the given `intent_hash`,
         including current lifecycle status and any solver/settlement metadata
         that has been attached since submission.
+
+        The path parameter is not format-validated against the `Hex` pattern
+        (see issue #348); a malformed hash is simply treated as unknown and
+        falls through to the `404` response below, the same as any other
+        hash with no matching record.
       parameters:
         - name: hash
           in: path
@@ -186,13 +259,41 @@ paths:
               schema:
                 $ref: '#/components/schemas/IntentRecord'
         '404':
-          description: No intent with the given hash exists in the mempool.
+          description: |
+            No intent with the given hash exists in the mempool. Also
+            returned for a syntactically invalid hash, since the path
+            parameter is not validated (see description above).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: "Intent not found"
+
+  /info:
+
+    get:
+      operationId: getInfo
+      tags: [Discovery]
+      summary: Discover the EIP-712 domain this mempool instance verifies against
+      description: |
+        Returns the EIP-712 domain (`name`, `version`, `chainId`,
+        `verifyingContract`) this mempool instance was configured with. A
+        client can use this to confirm it is signing intents against the
+        same chain/escrow the mempool will accept, without hard-coding the
+        values out of band.
+      responses:
+        '200':
+          description: The mempool's configured EIP-712 domain.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MempoolInfo'
+              example:
+                name: "Perihelion"
+                version: "1"
+                chainId: 8453
+                verifyingContract: "0x0000000000000000000000000000000000000000"
 
 components:
   schemas:
@@ -220,11 +321,13 @@ components:
 
     IntentStatus:
       type: string
-      description: Lifecycle state of an intent in the mempool.
+      description: |
+        Lifecycle state of an intent as tracked by this mempool. This is a
+        subset of the full on-chain/SDK lifecycle — see the "Intent
+        lifecycle" note above for `claimed`/`settling`, which this
+        implementation never assigns.
       enum:
         - pending
-        - claimed
-        - settling
         - settled
         - refunded
         - expired
@@ -308,10 +411,19 @@ components:
           examples:
             - 1751280000
         nonce:
-          $ref: '#/components/schemas/Hex'
+          type: string
           description: |
             Unique value preventing replay or collision of otherwise-identical
-            intents. Typically a random 32-byte hex string.
+            intents; encoded on-chain as a `uint256`. **Not** a `0x`-prefixed
+            hex string in practice: the SDK's default generator
+            (`randomNonce`) produces a base-10 decimal-digit string. A
+            `0x`-prefixed hex string is also accepted on submission (the SDK
+            parses it with `BigInt(...)`), but is not what callers get by
+            default — treat this as "any string `BigInt()` can parse",
+            not as `Hex`.
+          pattern: '^(0x[0-9a-fA-F]+|[0-9]+)$'
+          examples:
+            - "95395590780195993686340100862393633005949636859136019347794446361576576451305"
         preferredSolver:
           $ref: '#/components/schemas/Address'
           description: |
@@ -339,8 +451,9 @@ components:
           $ref: '#/components/schemas/Hex'
           description: |
             keccak256 EIP-712 commitment of the intent — the primary mempool
-            and on-chain identifier. Computed by the SDK `hashIntent` function
-            and verified server-side on submission.
+            and on-chain identifier. Computed by the SDK `hashIntent` function.
+            The server recomputes this value itself from `intent`; a
+            mismatched client-supplied `hash` is not currently rejected.
 
     IntentRecord:
       allOf:
@@ -351,7 +464,7 @@ components:
             the mempool server.
           required:
             - status
-            - createdAt
+            - submittedAt
           properties:
             status:
               $ref: '#/components/schemas/IntentStatus'
@@ -359,19 +472,28 @@ components:
               $ref: '#/components/schemas/Address'
               description: |
                 EVM address of the solver that claimed the intent.
-                Present only after status reaches `claimed` or later.
+                Reserved for future use — no endpoint currently sets this
+                field (see "Status ownership" above).
             settlementTx:
               type: string
               description: |
                 Stellar transaction hash of the settlement operation.
-                Present only after status reaches `settled`.
+                Reserved for future use — no endpoint currently sets this
+                field (see "Status ownership" above).
               examples:
                 - "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
-            createdAt:
+            submittedAt:
               type: integer
-              description: Unix timestamp (seconds) at which the record was created.
+              description: |
+                Unix timestamp **in milliseconds** (`Date.now()`) at which the
+                record was created. Named `submittedAt` to match the
+                reference server's wire format; note that the SDK's
+                `IntentRecord` type currently expects a field named
+                `createdAt` in seconds instead, which is why
+                `parseIntentRecord` rejects every response this mempool
+                produces (tracked by issue #294 — not yet reconciled).
               examples:
-                - 1751270400
+                - 1751270400000
 
     # ─── Request / response envelopes ──────────────────────────────────────
 
@@ -388,6 +510,36 @@ components:
             should verify this matches their locally-computed hash before
             storing the value.
 
+    MempoolInfo:
+      type: object
+      description: |
+        The EIP-712 domain this mempool instance verifies intent signatures
+        against, as returned by `GET /info`.
+      required:
+        - name
+        - version
+        - chainId
+        - verifyingContract
+      properties:
+        name:
+          type: string
+          description: EIP-712 domain name. Fixed to `"Perihelion"` by the SDK's `perihelionDomain` helper.
+          examples:
+            - "Perihelion"
+        version:
+          type: string
+          description: EIP-712 domain version. Fixed to `"1"` by the SDK's `perihelionDomain` helper.
+          examples:
+            - "1"
+        chainId:
+          type: integer
+          description: EVM chain ID this mempool instance's escrow is deployed on.
+          examples:
+            - 8453
+        verifyingContract:
+          $ref: '#/components/schemas/Address'
+          description: PerihelionEscrow contract address this mempool instance verifies signatures against.
+
     ErrorResponse:
       type: object
       description: |
@@ -402,5 +554,5 @@ components:
             - "Missing intent or signature"
             - "Invalid signature"
             - "Intent not found"
-            - "Intent already exists"
+            - "Invalid status filter: 'bogus' (expected one of pending, settled, refunded, expired)"
             - "Internal server error"

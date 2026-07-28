@@ -14,21 +14,31 @@ export interface MempoolServerOptions {
   verifyingContract?: Address;
 }
 
+/** The `IntentStatus` values the reference mempool can actually produce/accept. */
+const INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set([
+  "pending",
+  "settled",
+  "refunded",
+  "expired",
+]);
+
 export class MempoolServer {
   private app = express();
   private store = new IntentStore();
   private port: number;
   private host: string;
+  private chainId: number;
+  private verifyingContract: Address;
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
 
   constructor(opts: MempoolServerOptions = {}) {
     this.port = opts.port ?? 3000;
     this.host = opts.host ?? "localhost";
-    this.domain = perihelionDomain(
-      opts.chainId ?? 8453,
-      opts.verifyingContract ?? "0x0000000000000000000000000000000000000000",
-    );
+    this.chainId = opts.chainId ?? 8453;
+    this.verifyingContract =
+      opts.verifyingContract ?? "0x0000000000000000000000000000000000000000";
+    this.domain = perihelionDomain(this.chainId, this.verifyingContract);
     this.setupRoutes();
   }
 
@@ -38,6 +48,7 @@ export class MempoolServer {
     this.app.post("/intents", this.handleSubmitIntent.bind(this));
     this.app.get("/intents/:hash", this.handleGetIntent.bind(this));
     this.app.get("/intents", this.handleListIntents.bind(this));
+    this.app.get("/info", this.handleInfo.bind(this));
   }
 
   private async handleSubmitIntent(req: Request, res: Response): Promise<void> {
@@ -85,14 +96,49 @@ export class MempoolServer {
   }
 
   private handleListIntents(req: Request, res: Response): void {
-    const { status } = req.query as { status?: IntentStatus };
+    const { status, chainId, limit, offset } = req.query as {
+      status?: string;
+      chainId?: string;
+      limit?: string;
+      offset?: string;
+    };
+
+    if (status !== undefined && !INTENT_STATUSES.has(status as IntentStatus)) {
+      res.status(400).json({
+        error: `Invalid status filter: '${status}' (expected one of ${[...INTENT_STATUSES].join(", ")})`,
+      });
+      return;
+    }
 
     let records = this.store.all();
     if (status) {
       records = records.filter((r) => r.status === status);
     }
+    if (chainId !== undefined) {
+      const chainIdNum = Number(chainId);
+      records = records.filter((r) => r.intent.sourceChainId === chainIdNum);
+    }
+
+    // Pagination: `offset`/`limit` slice the (already-filtered) result set.
+    // Omitting both preserves the historical behaviour of returning every
+    // matching record in a single response.
+    const offsetNum = clampNonNegativeInt(offset, 0);
+    records = records.slice(offsetNum);
+    if (limit !== undefined) {
+      const limitNum = clampNonNegativeInt(limit, records.length);
+      records = records.slice(0, limitNum);
+    }
 
     res.json(records);
+  }
+
+  private handleInfo(_req: Request, res: Response): void {
+    res.json({
+      name: this.domain.name,
+      version: this.domain.version,
+      chainId: this.chainId,
+      verifyingContract: this.verifyingContract,
+    });
   }
 
   start(): Promise<void> {
@@ -119,4 +165,15 @@ export class MempoolServer {
   updateStatus(hash: Hex, status: IntentStatus): boolean {
     return this.store.updateStatus(hash, status);
   }
+}
+
+/**
+ * Parse a query-string integer, clamping negatives to 0 and falling back to
+ * `fallback` when the value is missing, empty, or not a finite number.
+ */
+function clampNonNegativeInt(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.trunc(n));
 }
