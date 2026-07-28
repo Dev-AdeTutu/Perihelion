@@ -96,3 +96,56 @@ test("rejects an intent signed under a mismatched verifyingContract", async () =
   const body = (await res.json()) as { error: string };
   assert.equal(body.error, "Invalid signature");
 });
+
+// ─── Issue 348: path/query parameter validation on GET /intents ────────────
+
+test("GET /intents/:hash returns 400 for a malformed hash instead of 404", async () => {
+  const res = await fetch(`${BASE}/intents/not-a-hash`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /hash/i);
+});
+
+test("GET /intents/:hash returns 400 for a hash of the wrong length", async () => {
+  const res = await fetch(`${BASE}/intents/0x${"ab".repeat(10)}`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents/:hash returns 404 (not 400) for a well-formed but unknown hash", async () => {
+  const res = await fetch(`${BASE}/intents/0x${"ab".repeat(32)}`);
+  assert.equal(res.status, 404);
+  const body = (await res.json()) as { error: string };
+  assert.equal(body.error, "Intent not found");
+});
+
+test("GET /intents/:hash lookup is case-insensitive", async () => {
+  const intent = sampleIntent();
+  const signature = await sign(intent, perihelionDomain(CHAIN_ID, ESCROW));
+  const submitRes = await submit(intent, signature);
+  const { hash } = (await submitRes.json()) as { hash: string };
+
+  const upperHashUrl = `${BASE}/intents/0x${hash.slice(2).toUpperCase()}`;
+  const res = await fetch(upperHashUrl);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { hash: string };
+  assert.equal(body.hash, hash);
+});
+
+test("GET /intents?status=<invalid> returns 400", async () => {
+  const res = await fetch(`${BASE}/intents?status=not-a-real-status`);
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /status must be one of/);
+});
+
+test("GET /intents?status=<repeated> returns 400 instead of silently comparing an array", async () => {
+  const res = await fetch(`${BASE}/intents?status=pending&status=settled`);
+  assert.equal(res.status, 400);
+});
+
+test("GET /intents?status=pending returns only matching records", async () => {
+  const res = await fetch(`${BASE}/intents?status=pending`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as Array<{ status: string }>;
+  assert.ok(body.every((r) => r.status === "pending"));
+});

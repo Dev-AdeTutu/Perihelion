@@ -144,7 +144,9 @@ paths:
           required: false
           description: |
             Filter results to intents in this lifecycle state. When omitted,
-            all intents are returned regardless of status.
+            all intents are returned regardless of status. Must be passed at
+            most once; repeating the parameter (`?status=a&status=b`) is
+            rejected rather than silently matching nothing.
           schema:
             $ref: '#/components/schemas/IntentStatus'
       responses:
@@ -156,6 +158,23 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/IntentRecord'
+        '400':
+          description: |
+            Validation failure — `status` is not one of the `IntentStatus`
+            enum values, or the parameter was repeated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidStatus:
+                  summary: Unrecognized status value
+                  value:
+                    error: "status must be one of pending, claimed, settling, settled, refunded, expired"
+                repeatedStatus:
+                  summary: status parameter passed more than once
+                  value:
+                    error: "status must be one of pending, claimed, settling, settled, refunded, expired"
 
   /intents/{hash}:
 
@@ -174,7 +193,8 @@ paths:
           description: |
             The canonical EIP-712 `intent_hash` that identifies this intent,
             as returned by `POST /intents` or computed locally by the SDK
-            `hashIntent` function.
+            `hashIntent` function. Lookup is case-insensitive — the server
+            normalizes the path parameter to lowercase before matching.
           schema:
             $ref: '#/components/schemas/Hex'
           example: "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
@@ -185,8 +205,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IntentRecord'
+        '400':
+          description: |
+            `hash` is not a well-formed `0x`-prefixed 32-byte hex string.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "hash must be a 0x-prefixed 32-byte hex string"
         '404':
-          description: No intent with the given hash exists in the mempool.
+          description: |
+            `hash` is well-formed but no intent with that hash exists in the
+            mempool.
           content:
             application/json:
               schema:

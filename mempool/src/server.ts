@@ -5,6 +5,25 @@ import type { Hex, SignedIntent, Address } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
 
+/** A canonical intent hash: `0x` followed by exactly 64 lowercase hex chars. */
+const HASH_RE = /^0x[0-9a-f]{64}$/;
+
+/**
+ * Canonical status vocabulary, shared with the SDK's {@link IntentStatus}
+ * (docs/api/mempool-api.yaml documents the same six values). Validating
+ * against this set — rather than trusting the query string — means a
+ * typo'd or repeated `status` filter fails loudly instead of silently
+ * matching nothing.
+ */
+const INTENT_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "claimed",
+  "settling",
+  "settled",
+  "refunded",
+  "expired",
+]);
+
 export interface MempoolServerOptions {
   port?: number;
   host?: string;
@@ -73,9 +92,13 @@ export class MempoolServer {
   }
 
   private handleGetIntent(req: Request, res: Response): void {
-    const { hash } = req.params as { hash: Hex };
-    const record = this.store.get(hash as Hex);
+    const raw = String(req.params.hash ?? "").toLowerCase();
+    if (!HASH_RE.test(raw)) {
+      res.status(400).json({ error: "hash must be a 0x-prefixed 32-byte hex string" });
+      return;
+    }
 
+    const record = this.store.get(raw as Hex);
     if (!record) {
       res.status(404).json({ error: "Intent not found" });
       return;
@@ -85,13 +108,21 @@ export class MempoolServer {
   }
 
   private handleListIntents(req: Request, res: Response): void {
-    const { status } = req.query as { status?: IntentStatus };
-
-    let records = this.store.all();
-    if (status) {
-      records = records.filter((r) => r.status === status);
+    const rawStatus = req.query.status;
+    if (rawStatus === undefined) {
+      res.json(this.store.all());
+      return;
     }
 
+    if (typeof rawStatus !== "string" || !INTENT_STATUSES.has(rawStatus)) {
+      res.status(400).json({
+        error: `status must be one of ${[...INTENT_STATUSES].join(", ")}`,
+      });
+      return;
+    }
+
+    const status = rawStatus as IntentStatus;
+    const records = this.store.all().filter((r) => r.status === status);
     res.json(records);
   }
 
