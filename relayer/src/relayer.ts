@@ -145,7 +145,9 @@ export interface ReadinessState {
   cursor: number;
   /** Latest chain head seen in the most recent poll. */
   head: number;
-  /** Lag = head − cursor. High lag means the relayer is falling behind. */
+  /** Confirmed head (latest block with sufficient confirmations). */
+  confirmedHead: number;
+  /** Lag = confirmedHead + 1 − cursor. High lag means the relayer is falling behind. */
   lag: number;
 }
 
@@ -176,6 +178,7 @@ export class Relayer {
     lastTickAt: 0,
     cursor: 0,
     head: 0,
+    confirmedHead: 0,
     lag: 0,
   };
 
@@ -285,12 +288,13 @@ export class Relayer {
       this.recordBlock({ number: head, hash: headHash, parentHash });
     }
 
-    const confirmedHead = head - this.config.confirmations;
+    const confirmedHead = Math.max(0, head - this.config.confirmations);
     const results: RelayResult[] = [];
 
     // Update readiness lag.
     this.readiness.head = head;
-    this.readiness.lag = Math.max(0, head - this.cursor);
+    this.readiness.confirmedHead = confirmedHead;
+    this.readiness.lag = Math.max(0, confirmedHead + 1 - this.cursor);
 
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
