@@ -1133,7 +1133,7 @@ impl Perihelion {
             return Err(PerihelionError::DeadlineTooFar);
         }
 
-        // Issue #15: verify that a peer is configured for fi.src_eid BEFORE
+        // Issue #15/#289: verify that a peer is configured for transport_src_eid BEFORE
         // registering the intent. If no peer exists for this eid, dispatch
         // (FillConfirmed / CancelIntent) will fail at settlement time with
         // UntrustedPeer, permanently stranding the intent. Rejecting here
@@ -1154,13 +1154,12 @@ impl Perihelion {
         //   funds. For well-formed messages from a compliant EVM escrow these
         //   two values are always equal (the escrow sets fi.src_eid = stellarEid
         //   which is the Stellar endpoint id, NOT its own eid; see the EVM codec).
-        //   In practice the two are the same on all known deployments, but we
-        //   guard on fi.src_eid here because that is what dispatch uses at
-        //   settlement time.
+        //   We validate against transport_src_eid because that is what dispatch
+        //   will use at settlement time (stored in rec.src_eid).
         if !env
             .storage()
             .instance()
-            .has(&DataKey::Peer(fi.src_eid))
+            .has(&DataKey::Peer(transport_src_eid))
         {
             return Err(PerihelionError::UntrustedPeer);
         }
