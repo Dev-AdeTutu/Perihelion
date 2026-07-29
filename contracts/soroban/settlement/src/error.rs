@@ -31,6 +31,8 @@ pub enum PerihelionError {
     NotPendingPeerChange = 135,
     /// Minimum peer-change delay has not yet elapsed (confirm_peer guard, issue #165).
     PeerChangeNotReady = 136,
+    /// Peer change proposal has expired (confirm_peer guard, issue #292).
+    PeerChangeExpired = 137,
 
     // --- Intent preconditions ---
     /// No registered intent for the given hash.

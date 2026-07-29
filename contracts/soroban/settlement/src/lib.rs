@@ -87,10 +87,21 @@ const MIN_SECS_PER_LEDGER: u64 = 4;
 /// covers any realistic cross-chain settlement window.
 pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 
+/// Minimum time window (seconds) required after deliver_intent for dispatch_confirmation
+/// to complete. Solvers cannot deliver into a window too short for the confirmation
+/// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
+/// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
+pub const MAX_DISPATCH_WINDOW: u64 = 1_800;
+
 /// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
 /// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
 /// Matches the EVM's 1-day minimum to give users time to react to peer rotations.
 pub const MIN_PEER_CHANGE_DELAY: u64 = 86_400; // 1 day in seconds
+
+/// Grace period for confirming a peer change after the minimum delay elapses.
+/// Proposals older than this window are rejected as stale (issue #292).
+/// Mirrors EVM's GRACE_PERIOD to prevent indefinite confirmation windows.
+pub const PEER_CHANGE_GRACE: u64 = 1_209_600; // 14 days in seconds
 
 /// Maximum delay for peer changes. Prevents governance from bricking peer
 /// rotation with an unworkably long delay. Mirrors EVM's MAX_DELAY.
@@ -205,14 +216,16 @@ impl Perihelion {
 
     /// Confirm and apply a pending peer change (issue #165). Admin-only.
     /// Must be called after the minimum delay (`MIN_PEER_CHANGE_DELAY`) has elapsed
-    /// since `propose_peer` was called. Atomically sets the new peer address and
-    /// clears the pending state.
+    /// since `propose_peer` was called and within the grace period (`PEER_CHANGE_GRACE`).
+    /// Atomically sets the new peer address and clears the pending state.
     ///
     /// Emits `peer_set(eid, old, new)` when the change is applied (issue #16).
+    /// Emits `peer_change_expired(eid)` when rejecting a stale proposal (issue #292).
     ///
     /// # Errors
     /// - `NotPendingPeerChange` if no peer change is pending for this eid
     /// - `PeerChangeNotReady` if the minimum delay has not yet elapsed
+    /// - `PeerChangeExpired` if the grace period has elapsed since the proposal
     pub fn confirm_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
 
@@ -231,6 +244,16 @@ impl Perihelion {
         let now = env.ledger().timestamp();
         if now < proposed_at + MIN_PEER_CHANGE_DELAY {
             return Err(PerihelionError::PeerChangeNotReady);
+        }
+
+        if now > proposed_at + MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE {
+            env.events().publish(
+                (Symbol::new(&env, "peer_change_expired"),),
+                (eid,),
+            );
+            env.storage().instance().remove(&DataKey::PendingPeer(eid));
+            env.storage().instance().remove(&DataKey::PendingPeerTime(eid));
+            return Err(PerihelionError::PeerChangeExpired);
         }
 
         let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
@@ -273,13 +296,18 @@ impl Perihelion {
     }
 
     /// Retrieve a pending peer change, if one exists (issue #165).
-    /// Returns (proposed_peer, proposed_at_timestamp) or None if no change pending.
-    pub fn get_pending_peer(env: Env, eid: u32) -> Result<Option<(BytesN<32>, u64)>, PerihelionError> {
+    /// Returns (proposed_peer, proposed_at_timestamp, ready_at, expires_at) or None if no change pending.
+    /// Allows callers to observe the confirmation window without manual computation (issue #292).
+    pub fn get_pending_peer(env: Env, eid: u32) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
 
         Ok(match (peer, time) {
-            (Some(p), Some(t)) => Some((p, t)),
+            (Some(p), Some(t)) => {
+                let ready_at = t.saturating_add(MIN_PEER_CHANGE_DELAY);
+                let expires_at = t.saturating_add(MIN_PEER_CHANGE_DELAY).saturating_add(PEER_CHANGE_GRACE);
+                Some((p, t, ready_at, expires_at))
+            }
             _ => None,
         })
     }
@@ -473,11 +501,15 @@ impl Perihelion {
         if rec.status != IntentStatus::Locked {
             return Err(PerihelionError::AlreadyFilled);
         }
-        if env.ledger().timestamp() >= rec.deadline {
+        let now = env.ledger().timestamp();
+        if now >= rec.deadline {
+            return Err(PerihelionError::IntentExpired);
+        }
+        if now + MAX_DISPATCH_WINDOW > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
-            if pref != &solver && env.ledger().timestamp() < rec.reservation_expires {
+            if pref != &solver && now < rec.reservation_expires {
                 return Err(PerihelionError::ReservedForSolver);
             }
         }
@@ -573,7 +605,7 @@ impl Perihelion {
         env.storage().persistent().set(&key, &rec);
 
         // Update solver reputation (PROPOSED Phase 3)
-        let fill_latency = env.ledger().sequence() - rec.fill_ledger;
+        let fill_latency = env.ledger().sequence().saturating_sub(rec.fill_ledger);
         Self::update_solver_reputation(&env, &solver, fill_latency)?;
 
         env.events().publish(
@@ -613,11 +645,15 @@ impl Perihelion {
         if rec.status != IntentStatus::Locked {
             return Err(PerihelionError::AlreadyFilled);
         }
-        if env.ledger().timestamp() >= rec.deadline {
+        let now = env.ledger().timestamp();
+        if now >= rec.deadline {
+            return Err(PerihelionError::IntentExpired);
+        }
+        if now + MAX_DISPATCH_WINDOW > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
-            if pref != &solver && env.ledger().timestamp() < rec.reservation_expires {
+            if pref != &solver && now < rec.reservation_expires {
                 return Err(PerihelionError::ReservedForSolver);
             }
         }
@@ -1309,11 +1345,12 @@ impl Perihelion {
         // This surfaces fee estimation failures as InsufficientLzFee rather
         // than an opaque revert from inside the endpoint, enabling solver
         // operators to distinguish underpayment from other dispatch errors.
-        let required = EndpointClient::new(env, &endpoint).quote(&params);
+        let client = EndpointClient::new(env, &endpoint);
+        let required = client.quote(&params);
         if lz_fee < required {
             return Err(PerihelionError::InsufficientLzFee);
         }
-        EndpointClient::new(env, &endpoint).send(&params, payer, &lz_fee);
+        client.send(&params, payer, &lz_fee);
         Ok(())
     }
 
