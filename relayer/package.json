@@ -8,6 +8,19 @@
   "bin": {
     "perihelion-relayer": "./dist/index.js"
   },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Perihelion-Protocol/Perihelion.git"
+  },
+  "homepage": "https://github.com/Perihelion-Protocol/Perihelion",
+  "bugs": "https://github.com/Perihelion-Protocol/Perihelion/issues",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",

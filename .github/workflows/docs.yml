@@ -93,29 +93,43 @@ jobs:
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check@3
 
-      - name: Create link-check config
-        run: |
-          cat > .mlc-config.json <<'EOF'
-          {
-            "ignorePatterns": [
-              { "pattern": "^https?://" },
-              { "pattern": "^mailto:" }
-            ],
-            "replacementPatterns": [],
-            "retryOn429": true,
-            "retryCount": 2,
-            "aliveStatusCodes": [200, 206]
-          }
-          EOF
-
-      - name: Check markdown links
+      - name: Check relative links
         run: |
           set -e
           FILES=$(find . -name '*.md' \
             -not -path './node_modules/*' \
             -not -path './.git/*' \
             -not -path '*/target/*' \
-            -not -path '*/lib/*')
+            -not -path '*/contracts/*')
+          FAILED=0
+          for f in $FILES; do
+            markdown-link-check "$f" --config .mlc-config.json || FAILED=1
+          done
+          exit $FAILED
+
+  markdown-links-external:
+    name: Check external links (nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.schedule == '0 2 * * *'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install markdown-link-check
+        run: npm install -g markdown-link-check@3
+
+      - name: Check all links including external
+        run: |
+          set -e
+          FILES=$(find . -name '*.md' \
+            -not -path './node_modules/*' \
+            -not -path './.git/*' \
+            -not -path '*/target/*' \
+            -not -path '*/contracts/*')
           FAILED=0
           for f in $FILES; do
             markdown-link-check "$f" --config .mlc-config.json || FAILED=1

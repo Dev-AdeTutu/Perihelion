@@ -1,0 +1,12 @@
+{
+  "ignorePatterns": [
+    { "pattern": "^mailto:" },
+    { "pattern": "^https://github.com/.*/(actions|blob)/" }
+  ],
+  "replacementPatterns": [],
+  "aliveStatusCodes": [200, 206, 301, 302, 307, 308],
+  "retryOn429": true,
+  "retryCount": 3,
+  "timeout": "20s",
+  "retryOn5xx": true
+}
