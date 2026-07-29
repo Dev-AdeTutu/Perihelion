@@ -142,7 +142,7 @@ test("rejects intent with hash mismatch", async () => {
   );
 });
 
-test("caches invalid signatures to avoid re-verification", async () => {
+test("caches invalid signatures to avoid re-verification within the negative TTL", async () => {
   const intent = buildTestIntent();
   const record = buildTestRecord(intent);
 
@@ -183,20 +183,183 @@ test("caches invalid signatures to avoid re-verification", async () => {
     "should warn about invalid signature"
   );
 
-  // Second tick - the intent is now retired in the seen-set (invalid sig is
-  // terminal), so it is short-circuited before verification: no re-verify and
-  // no repeated warning (which would otherwise spam the log every poll).
+  // Second tick, same (hash, signature) pair - the negative verification
+  // cache entry is still fresh, so the ECDSA check is skipped again, but the
+  // intent is NOT retired in `seen` (invalid signature is not terminal for
+  // the hash), so the rejection is still logged every poll.
   warnings.length = 0;
   await solver.tick();
   assert.equal(
     verifyCallCount,
     1,
-    "should not verify again (intent retired after invalid signature)"
+    "should not re-verify the same (hash, signature) pair within the negative TTL"
   );
+  assert.ok(
+    warnings.some((w) => w.includes("invalid signature")),
+    "should still warn since the intent hash was not retired to `seen`"
+  );
+});
+
+test("corrected resubmission with a valid signature is verified and filled", async () => {
+  const intent = buildTestIntent();
+  const badRecord = buildTestRecord(intent); // signature: "0xdeadbeef"
+  const goodSignature = "0xc0ffee00" as Hex;
+  const goodRecord: IntentRecord = { ...badRecord, signature: goodSignature };
+
+  let verifyCallCount = 0;
+  const mockVerify = mock.fn(async (_intent: unknown, signature: Hex) => {
+    verifyCallCount++;
+    return signature === goodSignature;
+  });
+
+  const warnings: string[] = [];
+  const mockLogger: Logger = {
+    info: () => {},
+    warn: (msg) => warnings.push(msg),
+    error: () => {},
+  };
+
+  const fills: Hex[] = [];
+  const mockExecutor: Executor = {
+    fill: async (signed) => {
+      fills.push(signed.hash);
+      return { settlementTx: "0xsettled" };
+    },
+  };
+
+  let pendingRecords: IntentRecord[] = [badRecord];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => pendingRecords,
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+
+  // First submission: bad signature, rejected, not filled.
+  await solver.tick();
+  assert.equal(verifyCallCount, 1, "should verify the bad signature");
+  assert.equal(fills.length, 0, "should not fill on invalid signature");
+  assert.ok(warnings.some((w) => w.includes("invalid signature")));
+
+  // Same intent hash resubmitted with a corrected, valid signature: must be
+  // independently re-verified (different cache key) and filled — proving the
+  // hash was never retired into `seen` after the earlier invalid signature.
+  pendingRecords = [goodRecord];
+  await solver.tick();
   assert.equal(
-    warnings.length,
-    0,
-    "should not re-warn for an already-rejected intent"
+    verifyCallCount,
+    2,
+    "corrected signature must be verified (distinct cache entry from the bad one)"
+  );
+  assert.equal(fills.length, 1, "corrected resubmission should be filled");
+  assert.equal(fills[0], goodRecord.hash);
+});
+
+test("negative verification cache entries expire, allowing re-verification", async () => {
+  const intent = buildTestIntent();
+  const record = buildTestRecord(intent);
+
+  let verifyCallCount = 0;
+  const mockVerify = mock.fn(async () => {
+    verifyCallCount++;
+    return false;
+  });
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("fill should not be called for invalid signature");
+    },
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [record],
+  })) as any;
+
+  const originalNow = Date.now;
+  try {
+    let fakeNow = originalNow();
+    Date.now = () => fakeNow;
+
+    const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+
+    await solver.tick();
+    assert.equal(verifyCallCount, 1, "should verify on first encounter");
+
+    // Still within the negative TTL: cached, no re-verification.
+    fakeNow += 30_000;
+    await solver.tick();
+    assert.equal(verifyCallCount, 1, "should still be cached before TTL elapses");
+
+    // Past the negative TTL (60s): the stale negative entry must be treated
+    // as a miss and the signature re-verified.
+    fakeNow += 31_000;
+    await solver.tick();
+    assert.equal(
+      verifyCallCount,
+      2,
+      "negative cache entry should have expired, triggering re-verification"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("two different signatures over the same hash do not share a cache entry", async () => {
+  const intent = buildTestIntent();
+  const hash = hashIntent(intent, domain);
+  const sigA = "0xaaaaaaaa" as Hex;
+  const sigB = "0xbbbbbbbb" as Hex;
+
+  const recordA: IntentRecord = {
+    intent,
+    signature: sigA,
+    hash,
+    status: "pending",
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+  const recordB: IntentRecord = { ...recordA, signature: sigB };
+
+  // Both signatures are treated as invalid by the mock verifier: this isolates
+  // the cache-keying behavior (does sigB get its own verification call?) from
+  // fill/seen-set interactions, which are covered by other tests.
+  const verifiedSignatures: Hex[] = [];
+  const mockVerify = mock.fn(async (_intent: unknown, signature: Hex) => {
+    verifiedSignatures.push(signature);
+    return false;
+  });
+
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("fill should not be called for invalid signature");
+    },
+  };
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  let pendingRecords: IntentRecord[] = [recordA];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => pendingRecords,
+  })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+
+  await solver.tick();
+  assert.deepEqual(verifiedSignatures, [sigA], "sigA verified once");
+
+  // Same intent hash, different signature: must be independently verified —
+  // NOT served from sigA's cache entry (which would happen if the cache were
+  // still keyed on hash alone).
+  pendingRecords = [recordB];
+  await solver.tick();
+  assert.deepEqual(
+    verifiedSignatures,
+    [sigA, sigB],
+    "sigB must be independently verified, not served from sigA's cache entry"
   );
 });
 

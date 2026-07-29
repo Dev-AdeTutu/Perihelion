@@ -62,34 +62,76 @@ export class FatalError extends Error {
 }
 
 /**
- * LRU cache for signature verification results. Evicts oldest entries when the
- * cache exceeds its size limit to prevent unbounded memory growth.
+ * How long a *negative* verification result stays cached. Kept short (relative
+ * to the LRU-only lifetime of positive results) because an invalid-signature
+ * verdict is a property of the (domain, hash, signature) triple, not of the
+ * intent hash alone: the same hash can be resubmitted later with a corrected
+ * signature, and that resubmission must be re-verified promptly rather than
+ * silently short-circuited by a stale cache entry.
+ *
+ * Positive results are never expired by TTL — a valid EIP-712 signature over
+ * a given domain+hash stays valid forever, so those entries are bounded only
+ * by LRU eviction.
+ */
+const NEGATIVE_VERIFICATION_TTL_MS = 60_000;
+
+/**
+ * Builds the {@link VerificationCache} key. Verification outcomes are only
+ * meaningful for a specific (domain, intent hash, signature) triple: two
+ * submissions that share an intent hash but carry different signatures (e.g.
+ * a bad signature followed by a corrected one) must never share a cache
+ * entry, and a signature that would be valid under one chain/escrow domain
+ * must not be treated as valid under another.
+ */
+function verificationCacheKey(
+  domain: { chainId?: number | bigint; verifyingContract?: string },
+  hash: Hex,
+  signature: Hex,
+): string {
+  return `${domain.chainId}:${domain.verifyingContract}:${hash}:${signature}`;
+}
+
+/**
+ * LRU cache for signature verification results, keyed by
+ * {@link verificationCacheKey} (domain + hash + signature). Evicts oldest
+ * entries when the cache exceeds its size limit to prevent unbounded memory
+ * growth. Negative (invalid) results additionally expire after
+ * {@link NEGATIVE_VERIFICATION_TTL_MS} so they cannot suppress
+ * reconsideration of a corrected resubmission indefinitely; positive results
+ * have no TTL since a valid signature never becomes invalid.
  */
 class VerificationCache {
-  private readonly cache = new Map<Hex, boolean>();
+  private readonly cache = new Map<string, { valid: boolean; expiresAt?: number }>();
   private readonly maxSize: number;
 
   constructor(maxSize = 10_000) {
     this.maxSize = maxSize;
   }
 
-  get(hash: Hex): boolean | undefined {
-    const result = this.cache.get(hash);
-    if (result !== undefined) {
-      // Move to end (LRU)
-      this.cache.delete(hash);
-      this.cache.set(hash, result);
+  get(key: string): boolean | undefined {
+    const entry = this.cache.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expiresAt !== undefined && Date.now() > entry.expiresAt) {
+      // Negative result has gone stale — treat as a miss so it is re-verified.
+      this.cache.delete(key);
+      return undefined;
     }
-    return result;
+    // Move to end (LRU)
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    return entry.valid;
   }
 
-  set(hash: Hex, valid: boolean): void {
-    // Evict oldest if at capacity
-    if (this.cache.size >= this.maxSize) {
+  set(key: string, valid: boolean): void {
+    // Evict oldest if at capacity (and this is a new key, not a refresh).
+    if (!this.cache.has(key) && this.cache.size >= this.maxSize) {
       const oldest = this.cache.keys().next().value;
       if (oldest !== undefined) this.cache.delete(oldest);
     }
-    this.cache.set(hash, valid);
+    this.cache.set(key, {
+      valid,
+      expiresAt: valid ? undefined : Date.now() + NEGATIVE_VERIFICATION_TTL_MS,
+    });
   }
 
   size(): number {
@@ -121,9 +163,15 @@ export class Solver {
   private readonly client: PerihelionClient;
 
   /**
-   * `seen` tracks hashes whose outcome is terminal (filled, invalid signature,
-   * or exhausted retries).  Bounded by LRU eviction (capacity cap) and TTL
-   * eviction (past-deadline entries are removed every tick).
+   * `seen` tracks hashes whose outcome is terminal (filled, or exhausted
+   * retries).  Bounded by LRU eviction (capacity cap) and TTL eviction
+   * (past-deadline entries are removed every tick).
+   *
+   * An invalid signature is *not* terminal for the hash and does not go into
+   * `seen`: the same intent hash can be resubmitted later with a corrected
+   * signature, and that resubmission must still be reconsidered. See
+   * {@link VerificationCache} for how repeated invalid submissions are still
+   * bounded (short TTL on negative results) without blocking a corrected one.
    *
    * ## Memory characteristics
    *
@@ -245,17 +293,23 @@ export class Solver {
       return;
     }
 
-    // Check cache first to avoid redundant verification.
-    let valid = this.verificationCache.get(hash);
+    // Check cache first to avoid redundant verification. Keyed on domain +
+    // hash + signature so a different signature over the same hash (e.g. a
+    // corrected resubmission) never reuses another signature's verdict.
+    const cacheKey = verificationCacheKey(domain, hash, signature);
+    let valid = this.verificationCache.get(cacheKey);
     if (valid === undefined) {
       valid = await this.verifier(intent, signature, domain);
-      this.verificationCache.set(hash, valid);
+      this.verificationCache.set(cacheKey, valid);
     }
 
     if (!valid) {
       this.log.warn("rejecting intent with invalid signature", { hash });
-      // Terminal: invalid signature will never become valid.
-      this.seen.add(hash, deadlineMs);
+      // Not terminal for the hash: only this (domain, hash, signature) triple
+      // is invalid. Do not add to `seen` — a resubmission of the same intent
+      // hash with a corrected signature must still be reconsidered and
+      // fillable. Repeated re-verification of the same bad signature is
+      // still bounded by the verification cache's negative-result TTL.
       this.retryState.delete(hash);
       return;
     }
