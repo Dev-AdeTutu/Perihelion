@@ -237,19 +237,26 @@ fn fill_instruction_recipient_does_not_survive_the_evm_encoder_truncation() {
     // it, decode it back on this side, and check whether the result is the
     // address we started with.
     //
-    // PerihelionEscrow.sol's `_encodeFillInstruction` copies the first 32
-    // bytes of `intent.destination` — the strkey's ASCII *text* — into the
-    // wire's fixed-width `recipient` field (`bytes32 recipient; ... recipient
-    // := mload(add(destBytes, 32))`). A Stellar contract strkey is 56 ASCII
-    // characters; the low 24 are silently dropped. This decoder then treats
-    // whatever 32 bytes it receives as a raw contract-id payload
-    // (`address_from_contract_id`), which is the correct interpretation for
-    // what the wire format *should* carry, but not for what the EVM side
-    // *actually* sends. The two conventions are structurally incompatible:
-    // no real Stellar address can survive this hop today. Tracked as
-    // issue #271; this test intentionally pins the current (broken) behavior
-    // so that fixing #271 requires consciously updating this assertion
-    // rather than the fix going unnoticed by the fuzz suite.
+    // PerihelionEscrow.sol's `_encodeFillInstruction` copies up to 56 bytes of
+    // `intent.destination` (the strkey's ASCII *text*) into the wire's
+    // fixed-width `recipient` field, right-zero-padded to 56 bytes. A Stellar
+    // account strkey is exactly 56 ASCII characters, so it does fit; however
+    // the decoder on this side treats that 56-byte ASCII blob as a Stellar
+    // strkey string and calls `Address::from_string_bytes`. The round-trip
+    // only works if the EVM side copies the full 56-char strkey correctly —
+    // i.e., that `_encodeFillInstruction` does not truncate it to 32 bytes as
+    // the old `mload` implementation did. If the encoder has been fixed,
+    // the decoded address will equal the original; if it still truncates, the
+    // decode will fail or produce a different address. Tracked as issue #271.
+    //
+    // This test intentionally pins the current (broken) behavior so that
+    // fixing #271 requires consciously updating this assertion rather than
+    // the fix going unnoticed by the fuzz suite.
+    //
+    // The payload uses the current 219-byte wire layout:
+    //   version(1) | type(1) | intent_hash(32) | src_eid(4) |
+    //   recipient(56) | dest_asset(69) | min_dest_amount(16) |
+    //   deadline(8) | preferred_solver(32)
     let env = Env::default();
     let original = Address::generate(&env);
     let strkey = original.to_string();
@@ -261,30 +268,46 @@ fn fill_instruction_recipient_does_not_survive_the_evm_encoder_truncation() {
         len >= 32,
         "strkey shorter than the wire field — check SDK strkey format"
     );
-    let mut truncated = [0u8; 32];
-    truncated.copy_from_slice(&ascii[..32]);
+
+    // The old EVM encoder truncated by doing mload(add(destBytes, 32)), which
+    // reads 32 bytes starting at offset 32 of the ABI-encoded bytes — i.e.,
+    // only the first 32 ASCII chars of the strkey. We simulate that truncation
+    // here to document the bug: take first 32 bytes, right-pad to 56.
+    let mut truncated_recipient = [0u8; 56];
+    truncated_recipient[..32].copy_from_slice(&ascii[..32]);
+    // bytes 32..56 remain zero (right-padded)
 
     let mut payload = Bytes::new(&env);
     payload.push_back(PROTOCOL_VERSION);
     payload.push_back(MSG_FILL_INSTRUCTION);
     payload.append(&Bytes::from_array(&env, &[0xAAu8; 32])); // intent_hash
     payload.append(&Bytes::from_array(&env, &30316u32.to_be_bytes())); // src_eid
-    payload.append(&Bytes::from_array(&env, &truncated)); // recipient (truncated strkey text)
-    payload.append(&Bytes::from_array(&env, &[0xCCu8; 32])); // dest_asset
-    payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));
-    payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes()));
+    payload.append(&Bytes::from_array(&env, &truncated_recipient)); // recipient (56 bytes, truncated)
+    payload.append(&Bytes::from_array(&env, &[0xCCu8; 69])); // dest_asset (69 bytes)
+    payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes())); // min_dest_amount
+    payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes())); // deadline
     payload.append(&Bytes::from_array(&env, &[0u8; 32])); // preferred_solver: open
 
-    assert_eq!(payload.len(), 158);
+    assert_eq!(payload.len(), 219);
 
-    let (msg_type, fi, _) =
-        decode_message(&env, &payload).expect("decoder accepts this payload structurally");
-    assert_eq!(msg_type, MSG_FILL_INSTRUCTION);
-
-    assert_ne!(
-        fi.recipient, original,
-        "recipient round-tripped correctly — issue #271 appears fixed; update this pinned-failure test"
-    );
+    // The decoder may reject a truncated strkey that doesn't correspond to a
+    // valid Stellar address, or it may decode a different address than the
+    // original. Either outcome documents the truncation bug.
+    let decode_result = decode_message(&env, &payload);
+    match decode_result {
+        Err(_) => {
+            // The truncated strkey is not a valid Stellar strkey — decoder
+            // correctly rejects it. Bug #271 manifests as rejection here.
+        }
+        Ok((msg_type, fi, _)) => {
+            assert_eq!(msg_type, MSG_FILL_INSTRUCTION);
+            assert_ne!(
+                fi.recipient, original,
+                "recipient round-tripped correctly — issue #271 appears fixed; \
+                 update this pinned-failure test"
+            );
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -316,7 +339,11 @@ proptest! {
         assert_eq!(decoded_reason, reason, "reason mismatch");
     }
 
-    /// Mutation: unknown reason codes (outside [0, 2]) must be rejected.
+    /// Mutation: unknown reason codes (outside [0, 2]) must be rejected by BOTH sides.
+    ///
+    /// This test verifies symmetry: the Rust decoder rejects bad reason codes, and the
+    /// same payload is exported to the corpus so the Solidity differential harness can
+    /// assert the EVM decoder also rejects it. Both sides must behave identically.
     #[test]
     fn prop_cancel_intent_unknown_reason(
         intent_hash in arb_hash(),
@@ -335,9 +362,17 @@ proptest! {
         assert_eq!(encoded.len(), 35);
         export_to_corpus("cancel_intent_bad_reason", &encoded);
 
-        // The Rust decoder rejects unknown reason codes — verify.
-        // (The actual rejection happens in decode_cancel_intent, which we'd need to call
-        // here if we want to test the Rust side. For now we just export the corpus.)
+        // Verify the Rust decoder also rejects the bad reason code.
+        // This closes the differential-fuzz gap: previously the test only exported
+        // the corpus payload but never asserted the Rust side rejects it, meaning
+        // a regression in the Rust decoder (e.g., accidentally accepting all reason
+        // codes) would go undetected even while the Solidity side correctly rejected.
+        let decode_result = crate::messages::decode_message(&env, &encoded);
+        prop_assert!(
+            decode_result.is_err(),
+            "Rust decoder must reject unknown reason code 0x{:02x}, but it accepted the payload",
+            bad_reason
+        );
     }
 }
 

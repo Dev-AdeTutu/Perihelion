@@ -463,25 +463,25 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// decode_fill_instruction requires exactly 158 bytes.
+    /// decode_fill_instruction requires exactly 219 bytes.
     #[test]
     fn test_decode_fill_instruction_wrong_length_rejected() {
         let env = Env::default();
         let mut short = Bytes::new(&env);
-        for _ in 0..157u32 {
+        for _ in 0..218u32 {
             short.push_back(0x00);
         }
         let result = decode_fill_instruction(&env, &short);
         assert!(result.is_err());
     }
 
-    /// A well-formed 158-byte FillInstruction with G... recipient and C... dest_asset decodes
+    /// A well-formed 219-byte FillInstruction with G... recipient and C... dest_asset decodes
     /// correctly using from_string_bytes (not from_contract_id).
     #[test]
     fn test_decode_fill_instruction_strkey_addresses() {
         let env = Env::default();
 
-        // Build a 158-byte payload manually.
+        // Build a 219-byte payload manually, matching the updated wire format.
         let mut msg = Bytes::new(&env);
 
         // version + type
@@ -499,15 +499,15 @@ mod tests {
         msg.push_back(0x00);
         msg.push_back(0x01);
 
-        // recipient (32 bytes): first 32 chars of ZERO_ACCOUNT right-zero-padded
+        // recipient (56 bytes): ZERO_ACCOUNT right-zero-padded
         let recip_bytes = ZERO_ACCOUNT.as_bytes();
-        for i in 0..32usize {
+        for i in 0..56usize {
             msg.push_back(if i < recip_bytes.len() { recip_bytes[i] } else { 0 });
         }
 
-        // dest_asset (32 bytes): first 32 chars of ZERO_CONTRACT right-zero-padded
+        // dest_asset (69 bytes): ZERO_CONTRACT right-zero-padded
         let asset_bytes = ZERO_CONTRACT.as_bytes();
-        for i in 0..32usize {
+        for i in 0..69usize {
             msg.push_back(if i < asset_bytes.len() { asset_bytes[i] } else { 0 });
         }
 
@@ -528,7 +528,7 @@ mod tests {
             msg.push_back(0x00);
         }
 
-        assert_eq!(msg.len(), 158);
+        assert_eq!(msg.len(), 219);
 
         let fi = decode_fill_instruction(&env, &msg).expect("should decode valid payload");
         assert_eq!(fi.src_eid, 1);
