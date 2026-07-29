@@ -12,6 +12,9 @@ export interface IntentStoreOptions {
 const DEFAULT_MAX_SIZE = 50_000;
 const DEFAULT_EXPIRY_GRACE_MS = 60_000;
 
+/** Terminal statuses cannot transition to any other status. */
+const TERMINAL_STATUSES: ReadonlySet<IntentStatus> = new Set(["settled", "refunded", "expired"]);
+
 /**
  * In-memory intent store. Bounded by `maxSize` (oldest-insertion eviction)
  * and swept of records past their deadline + grace period via
@@ -57,9 +60,14 @@ export class IntentStore {
     return record ? { ...record } : undefined;
   }
 
+  /**
+   * Update a record's status. Refuses to move a record out of a terminal
+   * status (`settled`/`refunded`/`expired`) — those are final.
+   */
   updateStatus(hash: Hex, status: IntentStatus): boolean {
     const record = this.records.get(hash);
     if (!record) return false;
+    if (TERMINAL_STATUSES.has(record.status)) return false;
     this.indexRemove(hash, record.status);
     record.status = status;
     this.indexAdd(hash, status);

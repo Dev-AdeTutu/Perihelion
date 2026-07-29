@@ -118,7 +118,7 @@ export class MempoolServer {
       }
 
       if (isExpired(intent)) {
-        res.status(400).json({ error: "Intent already expired" });
+        res.status(400).json({ error: "Intent deadline has passed" });
         return;
       }
 
@@ -137,6 +137,15 @@ export class MempoolServer {
       }
 
       const hash = hashIntent(intent, this.domain);
+
+      // Reject duplicate submissions rather than silently overwriting the
+      // existing record (and its status).
+      const existing = this.store.get(hash);
+      if (existing) {
+        res.status(409).json({ error: "Intent already exists", hash, status: existing.status });
+        return;
+      }
+
       const record: MempoolIntentRecord = {
         hash,
         intent,

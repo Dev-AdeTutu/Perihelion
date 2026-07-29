@@ -132,6 +132,10 @@ paths:
                   summary: Invalid EIP-712 signature
                   value:
                     error: "Invalid signature"
+                expiredDeadline:
+                  summary: Deadline has already passed
+                  value:
+                    error: "Intent deadline has passed"
         '409':
           description: |
             Conflict — an intent with this hash already exists in the mempool.
