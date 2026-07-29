@@ -34,3 +34,6 @@ export * from "./client.js";
 export * from "./units.js";
 export * from "./stellar.js";
 export * from "./validate.js";
+export * from "./escrow-abi.js";
+export * from "./escrow-client.js";
+export * from "./deployments.js";

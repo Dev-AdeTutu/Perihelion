@@ -110,6 +110,8 @@ export interface RelayMetrics {
   deadLettered: number;
   /** Maximum retry depth seen across all messages this session. */
   maxRetryDepth: number;
+  /** Current count of unresolved messages (neither delivered nor dead-lettered). */
+  unresolvedMessages: number;
 }
 
 /** Tracked block header for reorg detection. */
@@ -165,6 +167,7 @@ export class Relayer {
     failed: 0,
     deadLettered: 0,
     maxRetryDepth: 0,
+    unresolvedMessages: 0,
   };
 
   /** Sliding window of recent block headers for reorg detection. */
@@ -299,10 +302,32 @@ export class Relayer {
       results.push(result);
     }
 
-    // Advance the cursor past all confirmed blocks we've now processed.
-    this.cursor = Math.max(this.cursor, confirmedHead + 1);
+    // Only advance cursor past fully-resolved blocks.
+    // Find the minimum srcBlock among messages that are neither delivered nor dead-lettered.
+    const unresolved = results.filter(
+      (r) => !r.delivered && !r.error?.startsWith("dead-lettered"),
+    );
+    this.metrics.unresolvedMessages = unresolved.length;
+
+    let lowestUnresolved = Infinity;
+    for (const pending of messages) {
+      if (pending.srcBlock > confirmedHead) continue;
+      const result = results.find((r) => r.intentHash === pending.message.intentHash);
+      if (result && unresolved.includes(result)) {
+        lowestUnresolved = Math.min(lowestUnresolved, pending.srcBlock);
+      }
+    }
+
+    const nextCursor = Math.min(confirmedHead + 1, lowestUnresolved);
+    this.cursor = Math.max(this.cursor, nextCursor);
     this.readiness.cursor = this.cursor;
     await this.checkpoint.save(this.cursor);
+
+    // Persist dead-letter queue
+    if ("persist" in this.deadLetter) {
+      await (this.deadLetter as any).persist();
+    }
+
     return results;
   }
 

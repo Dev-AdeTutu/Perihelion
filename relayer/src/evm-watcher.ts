@@ -140,6 +140,8 @@ export interface EVMSourceWatcherConfig {
   sourceEid: EndpointId;
   /** LayerZero endpoint ID of the destination chain (Stellar; e.g., 40161 for testnet). */
   stellarEid: EndpointId;
+  /** Maximum block range per getLogs call (default 2000). Adapts downward on range errors. */
+  maxBlockRange?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,11 +159,15 @@ export interface EVMSourceWatcherConfig {
  */
 export class EVMSourceWatcher implements SourceWatcher {
   private readonly client: PublicClient;
+  private maxBlockRange: number;
+  private readonly transactionFetchConcurrency = 10;
+  private readonly transactionFetchTimeoutMs = 10_000;
 
   constructor(private readonly config: EVMSourceWatcherConfig) {
     this.client = createPublicClient({
       transport: http(config.rpcUrl),
     });
+    this.maxBlockRange = config.maxBlockRange ?? 2000;
   }
 
   async poll(
@@ -175,34 +181,78 @@ export class EVMSourceWatcher implements SourceWatcher {
     const headHash = latestBlock.hash ?? undefined;
     const parentHash = latestBlock.parentHash as string | undefined;
 
-    // Query Locked events from fromBlock to current head.
-    const logs = await this.client.getLogs({
-      address: this.config.escrowAddress as `0x${string}`,
-      event: LOCKED_EVENT_ABI[0],
-      fromBlock: BigInt(fromBlock),
-      toBlock: currentBlock,
-    });
-
+    // Query Locked events in chunked ranges to avoid provider limits.
     const messages: PendingMessage[] = [];
+    let scanHead = fromBlock;
 
-    for (const log of logs) {
+    while (scanHead <= head) {
+      const toBlock = Math.min(scanHead + this.maxBlockRange - 1, head);
+      let logs: Log[] = [];
+
       try {
-        const pending = await this.decodeLockedLog(log);
+        logs = await this.client.getLogs({
+          address: this.config.escrowAddress as `0x${string}`,
+          event: LOCKED_EVENT_ABI[0],
+          fromBlock: BigInt(scanHead),
+          toBlock: BigInt(toBlock),
+        });
+      } catch (err) {
+        // Exponential backoff with range halving on provider errors
+        if (this._isProviderRangeError(err)) {
+          if (this.maxBlockRange <= 1) throw err;
+          this.maxBlockRange = Math.max(1, Math.floor(this.maxBlockRange / 2));
+          console.warn("EVMSourceWatcher: provider range error, halving max block range", {
+            newMaxBlockRange: this.maxBlockRange,
+            err: String(err),
+          });
+          continue; // Retry this chunk with smaller range
+        }
+        throw err;
+      }
+
+      // Batch decode with concurrency-limited transaction fetches.
+      const pendingDecodings = logs.map((log) => this.decodeLockedLog(log));
+      const decodedMessages = await this._batchConcurrent(
+        pendingDecodings,
+        this.transactionFetchConcurrency,
+      );
+
+      for (const pending of decodedMessages) {
         if (pending !== null) {
           messages.push(pending);
         }
-      } catch (err) {
-        // Log decode error but continue processing other logs.
-        // A single malformed log must not halt the watcher.
-        console.error("EVMSourceWatcher: failed to decode Locked log", {
-          txHash: log.transactionHash,
-          blockNumber: log.blockNumber?.toString(),
-          err: String(err),
-        });
       }
+
+      scanHead = toBlock + 1;
     }
 
     return { messages, head, headHash, parentHash };
+  }
+
+  private _isProviderRangeError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    const msg = err.message.toLowerCase();
+    return msg.includes("range") || msg.includes("too large") || msg.includes("limit");
+  }
+
+  private async _batchConcurrent<T>(
+    promises: Promise<T>[],
+    concurrency: number,
+  ): Promise<T[]> {
+    const results: T[] = [];
+    for (let i = 0; i < promises.length; i += concurrency) {
+      const batch = promises.slice(i, i + concurrency);
+      const batchResults = await Promise.allSettled(batch);
+      for (const result of batchResults) {
+        if (result.status === "fulfilled") {
+          results.push(result.value);
+        } else {
+          console.error("EVMSourceWatcher: error in concurrent batch", { err: result.reason });
+          results.push(null as any);
+        }
+      }
+    }
+    return results;
   }
 
   /**

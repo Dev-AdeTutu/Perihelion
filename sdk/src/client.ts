@@ -224,6 +224,8 @@ export class PerihelionClient {
    *                            (must match the escrow's `confirmationGrace`).
    *                            Defaults to 2 hours (the contract default).
    * @returns True if the intent can be refunded via `cancelExpired`.
+   *
+   * @see {PerihelionEscrowClient.confirmationGrace} to read the live grace period from the contract.
    */
   isRefundable(
     record: IntentRecord,

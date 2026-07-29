@@ -11,6 +11,7 @@ import { Relayer } from "./relayer.js";
 import { EVMSourceWatcher } from "./evm-watcher.js";
 import { SorobanDestinationDelivery } from "./soroban-delivery.js";
 import { FileCheckpointStore } from "./file-checkpoint-store.js";
+import { HybridDeadLetterStore } from "./file-dead-letter-store.js";
 import { createLogger } from "./logger.js";
 import { HealthServer } from "./health-server.js";
 
@@ -20,6 +21,7 @@ export { Relayer } from "./relayer.js";
 export { FileCheckpointStore } from "./file-checkpoint-store.js";
 export { NoopCheckpointStore } from "./checkpoint.js";
 export { InMemoryDeadLetterStore } from "./dead-letter.js";
+export { FileDeadLetterStore, HybridDeadLetterStore } from "./file-dead-letter-store.js";
 export { createLogger } from "./logger.js";
 export { HealthServer } from "./health-server.js";
 export type { CheckpointStore } from "./checkpoint.js";
@@ -55,7 +57,21 @@ async function main(): Promise<void> {
   const checkpoint = new FileCheckpointStore(
     process.env.PERIHELION_CHECKPOINT_FILE || "./.perihelion-relayer-checkpoint.json",
   );
-  const relayer = new Relayer(config, watcher, delivery, log, 0, checkpoint);
+
+  const deadLetter = new HybridDeadLetterStore(
+    process.env.PERIHELION_DEAD_LETTER_FILE || "./.perihelion-relayer-dead-letter.json",
+  );
+  await deadLetter.load();
+
+  const relayer = new Relayer(
+    config,
+    watcher,
+    delivery,
+    log,
+    config.startBlock,
+    checkpoint,
+    deadLetter,
+  );
 
   // Health / readiness / metrics HTTP server.
   const healthPort = Number(process.env.PERIHELION_HEALTH_PORT ?? 8080);

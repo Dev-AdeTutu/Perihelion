@@ -13,6 +13,8 @@ export interface RelayerConfig {
   readonly confirmations: number;
   /** Poll interval for new messages, milliseconds. */
   readonly pollIntervalMs: number;
+  /** Starting block for initial poll (avoids scanning genesis). */
+  readonly startBlock: number;
 }
 
 /** 0x-prefixed 20-byte EVM address. */
@@ -63,6 +65,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     );
   }
 
+  const startBlock = Number(env.PERIHELION_START_BLOCK ?? 0);
+  if (Number.isNaN(startBlock) || startBlock < 0) {
+    errors.push(
+      `PERIHELION_START_BLOCK must be a non-negative integer, got: "${env.PERIHELION_START_BLOCK}"`,
+    );
+  }
+
   if (errors.length > 0) {
     throw new Error(
       `Relayer configuration error — fix the following before starting:\n  • ${errors.join("\n  • ")}`,
@@ -77,5 +86,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     settlementContractId,
     confirmations,
     pollIntervalMs,
+    startBlock,
   };
 }
