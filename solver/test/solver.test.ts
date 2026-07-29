@@ -476,6 +476,100 @@ test("verification cache evicts oldest entries when full", async () => {
   );
 });
 
+// ─── Issue 349: seen-set TTL clamp + terminal-skip honoring ─────────────────
+
+test("terminal skip (expired intent) is retired to the seen-set, not reconsidered every tick", async () => {
+  const intent = buildTestIntent();
+  // buildIntent rejects past deadlines, so build a valid intent then expire it.
+  const expired = { ...intent, deadline: 1 };
+  const record = buildTestRecord(expired);
+
+  const infos: string[] = [];
+  const mockLogger: Logger = {
+    info: (msg) => infos.push(msg),
+    warn: () => {},
+    error: () => {},
+  };
+
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("fill should not be called for an expired intent");
+    },
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [record],
+  })) as any;
+
+  const solver = new Solver(
+    baseConfig,
+    mockExecutor,
+    mockLogger,
+    undefined,
+    undefined,
+    mock.fn(async () => true),
+  );
+
+  await solver.tick();
+  assert.ok(
+    infos.some((m) => m.includes("skipping intent")),
+    "first tick logs the skip",
+  );
+
+  infos.length = 0;
+  await solver.tick();
+  assert.equal(
+    infos.length,
+    0,
+    "expired intent must not be re-logged on subsequent ticks (terminal skip retired it)",
+  );
+});
+
+test("terminal skip survives evictExpired() despite the intent's own deadline being in the past", async () => {
+  const intent = buildTestIntent();
+  const expired = { ...intent, deadline: 1 }; // long-past Unix-seconds deadline
+  const record = buildTestRecord(expired);
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  const skips: string[] = [];
+  const mockMetrics = { recordSkip: (reason: string) => skips.push(reason) } as any;
+  const mockExecutor: Executor = {
+    fill: async () => {
+      throw new Error("fill should not be called for an expired intent");
+    },
+  };
+
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [record],
+  })) as any;
+
+  const solver = new Solver(
+    baseConfig,
+    mockExecutor,
+    mockLogger,
+    mockMetrics,
+    undefined,
+    mock.fn(async () => true),
+  );
+
+  // A naive TTL derived straight from the (past) deadline would be evicted
+  // by evictExpired() on the very next tick, causing the intent to be
+  // reconsidered (and re-skipped) on every subsequent tick.
+  await solver.tick();
+  await solver.tick();
+  await solver.tick();
+
+  assert.equal(
+    skips.length,
+    1,
+    "the terminal skip must be recorded once, not once per tick",
+  );
+});
+
 // ─── Issue 92: FatalError propagation and graceful drain ────────────────────
 
 test("FatalError thrown from tick() rejects start()", async () => {

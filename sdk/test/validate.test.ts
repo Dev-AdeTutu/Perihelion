@@ -70,6 +70,14 @@ test("parseIntentRecord rejects a malformed signature", () => {
   );
 });
 
+test("parseIntentRecord rejects a non-positive or non-integer deadline", () => {
+  for (const deadline of [-1, 0, 1.5, NaN]) {
+    const record = validRecord();
+    (record.intent as Record<string, unknown>).deadline = deadline;
+    assert.throws(() => parseIntentRecord(record), MempoolResponseError);
+  }
+});
+
 test("parseIntentRecord rejects a non-numeric createdAt", () => {
   assert.throws(
     () => parseIntentRecord(validRecord({ createdAt: "1700000000" })),
