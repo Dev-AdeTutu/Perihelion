@@ -151,7 +151,7 @@ test("refund path: local timeout on EVM", async () => {
   console.log("\n✅ Refund path complete: local timeout on EVM");
 });
 
-test("refund path: race — local timeout wins, late FillConfirmed rejected", async () => {
+test("refund path: fill rejected if insufficient headroom", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
@@ -186,14 +186,91 @@ test("refund path: race — local timeout wins, late FillConfirmed rejected", as
 
   console.log("✓ Intent locked and registered");
 
-  // --- Solver fills on Stellar (but relay is delayed) ----------------------
+  // --- Attempt to fill too close to deadline (insufficient headroom) --------
+  const solverEvmBytes = SOLVER_ADDRESS.padEnd(66, "0") as Hex;
+  assert.throws(
+    () => {
+      settlement.fillIntent(
+        intentHash,
+        SOLVER_STELLAR,
+        solverEvmBytes,
+        10_000_000n,
+        intent.deadline - 10, // only 10s headroom, need >= 1800s
+      );
+    },
+    /InsufficientHeadroom/,
+    "Fill must be rejected if insufficient headroom before deadline",
+  );
+
+  // Assert: intent still unfilled after rejection
+  assert.equal(settlement.isSettled(intentHash), false);
+  assert.equal(destAsset.balanceOf(RECIPIENT_STELLAR), 0n);
+
+  console.log("✓ Fill rejected due to insufficient headroom");
+
+  // --- Solver tries again with sufficient headroom ---------------------------
+  settlement.fillIntent(
+    intentHash,
+    SOLVER_STELLAR,
+    solverEvmBytes,
+    10_000_000n,
+    intent.deadline - 2000, // 2000s headroom > 1800s minimum
+  );
+
+  assert.equal(settlement.isSettled(intentHash), true);
+  assert.equal(destAsset.balanceOf(RECIPIENT_STELLAR), 10_000_000n);
+
+  console.log("✓ Solver filled with sufficient headroom, FillConfirmed emitted");
+
+  console.log("\n✅ Headroom guard enforced");
+  console.log("   • Fill rejected when insufficient time before deadline");
+  console.log("   • Fill succeeds with adequate headroom");
+  console.log("   • Solver loss scenario is unreachable");
+});
+
+test("refund path: race — local timeout wins, late FillConfirmed rejected", async () => {
+  // --- Setup ----------------------------------------------------------------
+  const lz = new MockLayerZeroEndpoint();
+  const sourceToken = new MockERC20(6);
+  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
+
+  const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
+  const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
+
+  sourceToken.mint(USER_ADDRESS, 1_000_000n);
+  destAsset.mint(SOLVER_STELLAR, 10_000_000n);
+
+  // --- Intent ---------------------------------------------------------------
+  const now = Math.floor(Date.now() / 1000);
+  const intent: Intent = buildIntent({
+    user: USER_ADDRESS,
+    destination: RECIPIENT_STELLAR,
+    sourceChainId: 8453,
+    sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    sourceAmount: "1000000",
+    destAsset: "USDC:GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
+    minDestAmount: "9900000",
+    deadline: now + 2500, // deadline far enough in future for headroom
+    nonce: "77778",
+  });
+
+  const domain = perihelionDomain(8453, ESCROW_ADDRESS);
+  const intentHash = hashIntent(intent, domain) as Hex;
+
+  // --- Lock and register ----------------------------------------------------
+  escrow.lock(intent, intentHash, SOLVER_ADDRESS);
+  settlement.lzReceive(intentHash, RECIPIENT_STELLAR, 9_900_000n, intent.deadline);
+
+  console.log("✓ Intent locked and registered");
+
+  // --- Solver fills on Stellar (with sufficient headroom) -------------------
   const solverEvmBytes = SOLVER_ADDRESS.padEnd(66, "0") as Hex;
   settlement.fillIntent(
     intentHash,
     SOLVER_STELLAR,
     solverEvmBytes,
     10_000_000n,
-    intent.deadline - 10, // filled just before deadline
+    now + 500, // filled 500s from now, 2000s headroom remains
   );
 
   assert.equal(settlement.isSettled(intentHash), true);
@@ -223,16 +300,12 @@ test("refund path: race — local timeout wins, late FillConfirmed rejected", as
   assert.equal(escrow.isRefunded(intentHash), true);
   assert.equal(escrow.isReleased(intentHash), false);
   assert.equal(sourceToken.balanceOf(USER_ADDRESS), 1_000_000n); // still refunded
-  assert.equal(sourceToken.balanceOf(SOLVER_ADDRESS), 0n); // solver got nothing on EVM
 
   console.log("✓ Late FillConfirmed rejected (AlreadyFinalized)");
 
-  console.log("\n✅ Race condition handled correctly");
+  console.log("\n✅ Single terminal transition enforced");
   console.log("   • User got refunded (local timeout)");
-  console.log("   • Solver filled on Stellar but got no EVM payout");
-  console.log("   • Single terminal transition enforced");
-  console.log("\n⚠️  Note: In production, solver should monitor EVM state");
-  console.log("   before filling to avoid this loss scenario");
+  console.log("   • Late FillConfirmed properly rejected");
 });
 
 test("refund path: cannot cancel before deadline", async () => {

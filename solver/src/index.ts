@@ -41,16 +41,24 @@ async function main(): Promise<void> {
     log.info("metrics endpoint listening", { port: metricsPort, path: "/metrics" });
   });
 
-  const shutdown = () => {
-    log.info("shutting down solver");
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info("shutting down solver", { signal });
     solver.stop();
-    server.close();
-    process.exit(0);
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  await solver.start();
+  try {
+    await solver.start();
+  } finally {
+    log.info("solver stopped cleanly");
+  }
 }
 
 main().catch((err) => {

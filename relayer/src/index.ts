@@ -37,21 +37,33 @@ async function main(): Promise<void> {
   // Structured JSON logger — replaces console for production-grade output.
   const log = createLogger({ component: "relayer" });
 
+  // Log startup configuration (with secret redacted)
+  log.info("relayer starting", {
+    escrowAddress: config.escrowAddress,
+    settlementContractId: config.settlementContractId,
+    sourceEid: config.sourceEid,
+    stellarEid: config.stellarEid,
+    confirmations: config.confirmations,
+    pollIntervalMs: config.pollIntervalMs,
+    evmRpcUrl: config.evmRpcUrl,
+    stellarRpcUrl: config.stellarRpcUrl,
+    stellarNetwork: config.stellarNetwork,
+    signerSecretConfigured: !!config.signerSecret,
+  });
+
   // Initialize concrete implementations
   const watcher = new EVMSourceWatcher({
-    rpcUrl: process.env.EVM_RPC_URL || "http://localhost:8545",
+    rpcUrl: config.evmRpcUrl,
     escrowAddress: config.escrowAddress,
-    sourceEid: Number(process.env.PERIHELION_SOURCE_EID ?? 30101),
-    stellarEid: Number(process.env.PERIHELION_STELLAR_EID ?? 40161),
+    sourceEid: config.sourceEid,
+    stellarEid: config.stellarEid,
   });
 
   const delivery = new SorobanDestinationDelivery({
-    rpcUrl: process.env.SOROBAN_RPC_URL || "http://localhost:8000",
-    networkPassphrase:
-      process.env.STELLAR_NETWORK ||
-      "Test SDF Network ; September 2015",
+    rpcUrl: config.stellarRpcUrl,
+    networkPassphrase: config.stellarNetwork,
     settlementContractId: config.settlementContractId,
-    signerSecret: process.env.SIGNER_SECRET || "",
+    signerSecret: config.signerSecret,
   });
 
   const checkpoint = new FileCheckpointStore(
@@ -78,16 +90,22 @@ async function main(): Promise<void> {
   const healthServer = new HealthServer(relayer, healthPort, log);
   await healthServer.start();
 
-  const shutdown = () => {
-    log.info("shutting down relayer");
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info("shutting down relayer", { signal });
     relayer.stop();
-    healthServer.stop();
-    process.exit(0);
+    await healthServer.stop();
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  await relayer.start();
+  try {
+    await relayer.start();
+  } finally {
+    log.info("relayer stopped cleanly");
+  }
 }
 
 main().catch((err) => {

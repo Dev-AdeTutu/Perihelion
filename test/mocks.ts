@@ -12,6 +12,10 @@ const MSG_FILL_INSTRUCTION = 0x01;
 const MSG_FILL_CONFIRMED = 0x02;
 const MSG_CANCEL_INTENT = 0x03;
 
+// Minimum time buffer between now and deadline required to fill an intent.
+// Derived from MIN_CONFIRMATION_GRACE (1800s) to ensure FillConfirmed arrives before deadline.
+const MIN_FILL_HEADROOM = 1800;
+
 export interface LzMessage {
   srcEid: number;
   dstEid: number;
@@ -267,6 +271,7 @@ export class MockSettlement {
 
   /**
    * Solver fills the intent: transfer assets to recipient and emit FillConfirmed.
+   * Requires sufficient time headroom to ensure FillConfirmed arrives before deadline.
    */
   fillIntent(
     intentHash: Hex,
@@ -284,6 +289,9 @@ export class MockSettlement {
     }
     if (now >= intent.deadline) {
       throw new Error(`IntentExpired: ${intentHash}`);
+    }
+    if (intent.deadline - now < MIN_FILL_HEADROOM) {
+      throw new Error(`InsufficientHeadroom: deadline - now = ${intent.deadline - now}s, need >= ${MIN_FILL_HEADROOM}s`);
     }
     if (fillAmount < intent.minDestAmount) {
       throw new Error(`InsufficientFillAmount: ${fillAmount} < ${intent.minDestAmount}`);

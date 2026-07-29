@@ -161,10 +161,18 @@ export class HealthServer {
     });
   }
 
-  /** Stop the HTTP server. */
-  stop(): void {
-    this.server?.close();
-    this.server = null;
+  /** Stop the HTTP server. Resolves once the server has closed. */
+  stop(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.server) {
+        resolve();
+        return;
+      }
+      this.server.close(() => {
+        this.server = null;
+        resolve();
+      });
+    });
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
