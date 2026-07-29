@@ -38,6 +38,10 @@ export interface MempoolServerOptions {
   verifyingContract?: Address;
 }
 
+const DEFAULT_LIST_LIMIT = 100;
+const MAX_LIST_LIMIT = 1000;
+const SWEEP_INTERVAL_MS = 30_000;
+
 export class MempoolServer {
   private app = express();
   private store = new IntentStore();
@@ -46,6 +50,7 @@ export class MempoolServer {
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
   private rateLimitHits = new Map<string, number[]>();
+  private sweepTimer?: ReturnType<typeof setInterval>;
 
   constructor(opts: MempoolServerOptions = {}) {
     this.port = opts.port ?? 3000;
@@ -147,26 +152,42 @@ export class MempoolServer {
   }
 
   private handleListIntents(req: Request, res: Response): void {
+    // Validate `status` against the canonical vocabulary before it reaches the
+    // store, so a typo'd or repeated filter fails loudly instead of silently
+    // matching nothing (#348).
     const rawStatus = req.query.status;
-    if (rawStatus === undefined) {
-      res.json(this.store.all());
-      return;
+    let status: IntentStatus | undefined;
+    if (rawStatus !== undefined) {
+      if (typeof rawStatus !== "string" || !INTENT_STATUSES.has(rawStatus)) {
+        res.status(400).json({
+          error: `status must be one of ${[...INTENT_STATUSES].join(", ")}`,
+        });
+        return;
+      }
+      status = rawStatus as IntentStatus;
     }
 
-    if (typeof rawStatus !== "string" || !INTENT_STATUSES.has(rawStatus)) {
-      res.status(400).json({
-        error: `status must be one of ${[...INTENT_STATUSES].join(", ")}`,
-      });
-      return;
-    }
+    const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+    const limitParam = Number(req.query.limit);
+    const limit = Number.isInteger(limitParam) && limitParam > 0
+      ? Math.min(limitParam, MAX_LIST_LIMIT)
+      : DEFAULT_LIST_LIMIT;
 
-    const status = rawStatus as IntentStatus;
-    const records = this.store.all().filter((r) => r.status === status);
-    res.json(records);
+    const records = this.store.all(status);
+    const startIndex = cursor ? records.findIndex((r) => r.hash === cursor) + 1 : 0;
+    const page = records.slice(startIndex, startIndex + limit);
+    const nextCursor = startIndex + limit < records.length ? page[page.length - 1]?.hash : undefined;
+
+    res.json({ records: page, nextCursor });
   }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
+      console.warn(
+        "Mempool store is in-memory only: pending intents are lost on restart.",
+      );
+      this.sweepTimer = setInterval(() => this.store.evictExpired(), SWEEP_INTERVAL_MS);
+      this.sweepTimer.unref?.();
       this.server = this.app.listen(this.port, this.host, () => {
         console.log(`Mempool server listening on http://${this.host}:${this.port}`);
         resolve();
@@ -177,6 +198,10 @@ export class MempoolServer {
   /** Stop the HTTP listener. Resolves once the server has closed. */
   stop(): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (this.sweepTimer) {
+        clearInterval(this.sweepTimer);
+        this.sweepTimer = undefined;
+      }
       if (!this.server) {
         resolve();
         return;

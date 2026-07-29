@@ -132,12 +132,12 @@ paths:
       tags: [Intents]
       summary: List intents, optionally filtered by status
       description: |
-        Returns all intent records in the mempool. Pass the optional `status`
-        query parameter to filter to a single lifecycle state.
+        Returns a page of intent records in the mempool. Pass the optional
+        `status` query parameter to filter to a single lifecycle state.
 
-        **Pagination note:** the current implementation returns all matching
-        records in one response. Future versions may add cursor-based
-        pagination.
+        Results are paginated: pass `cursor` (the last `hash` from the
+        previous page) to fetch the next page. A `nextCursor` is included in
+        the response while more records remain.
       parameters:
         - name: status
           in: query
@@ -149,15 +149,34 @@ paths:
             rejected rather than silently matching nothing.
           schema:
             $ref: '#/components/schemas/IntentStatus'
+        - name: limit
+          in: query
+          required: false
+          description: Maximum records to return. Defaults to 100, capped at 1000.
+          schema:
+            type: integer
+        - name: cursor
+          in: query
+          required: false
+          description: The `hash` of the last record from the previous page.
+          schema:
+            type: string
       responses:
         '200':
-          description: Array of intent records (may be empty).
+          description: A page of intent records.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/IntentRecord'
+                type: object
+                properties:
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IntentRecord'
+                  nextCursor:
+                    type: string
+                    nullable: true
+                    description: Pass as `cursor` to fetch the next page. Absent on the last page.
         '400':
           description: |
             Validation failure — `status` is not one of the `IntentStatus`
