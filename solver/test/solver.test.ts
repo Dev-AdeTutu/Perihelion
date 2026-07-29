@@ -591,3 +591,104 @@ test("complete flow: hash validation and cached verification", async () => {
   assert.equal(verifyCount, 1, "should not re-verify (cached)");
   assert.equal(fills.length, 1, "should not fill again (already seen)");
 });
+
+// ─── Issue 314: in-flight inventory reservation ──────────────────────────────
+
+test("consider: reserves inventory before filling, preventing a second intent from over-committing the same balance", async () => {
+  const intentA = buildTestIntent();
+  const intentB = buildIntent({ ...intentA, nonce: "555555" });
+  const recordA = buildTestRecord(intentA);
+  const recordB = buildTestRecord(intentB);
+
+  // Balance covers exactly one intent's minDestAmount (990000), not both.
+  const inventory: InventoryProvider = { availableBalance: async () => 990000n };
+
+  let releaseFill: () => void = () => {};
+  const fillGate = new Promise<void>((resolve) => {
+    releaseFill = resolve;
+  });
+
+  const fillAttempts: string[] = [];
+  const mockExecutor: Executor = {
+    fill: async (signed) => {
+      fillAttempts.push(signed.intent.nonce);
+      await fillGate;
+      return { settlementTx: "0xfilled" };
+    },
+  };
+
+  const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => [] })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
+  const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(
+    solver,
+  );
+
+  // Start filling intentA; its executor.fill() call blocks on fillGate,
+  // holding the reservation open past the point evaluate() re-reads balance.
+  const considerA = consider(recordA);
+
+  // Let intentA's verify → evaluate → reserve → fill-start run to completion.
+  // Everything up to that point is microtask-only (no real timers), so a
+  // single macrotask boundary is enough to observe the fill call landing.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(fillAttempts.length, 1, "intentA's fill should be in flight");
+
+  // intentB needs the same asset and would fit alone, but not alongside
+  // intentA's still-unsettled reservation.
+  await consider(recordB);
+  assert.equal(
+    fillAttempts.length,
+    1,
+    "intentB should be skipped: the shared balance is already reserved by intentA",
+  );
+
+  releaseFill();
+  await considerA;
+  assert.equal(fillAttempts.length, 1, "no additional fill attempts after intentA settles");
+});
+
+test("consider: releases the reservation when a fill fails, freeing capacity for a later intent", async () => {
+  const intentA = buildTestIntent();
+  const intentB = buildIntent({ ...intentA, nonce: "777777" });
+  const recordA = buildTestRecord(intentA);
+  const recordB = buildTestRecord(intentB);
+
+  const inventory: InventoryProvider = { availableBalance: async () => 990000n };
+
+  const mockExecutor: Executor = {
+    fill: mock.fn(async (signed) => {
+      if (signed.intent.nonce === intentA.nonce) {
+        throw new Error("simulated fill failure");
+      }
+      return { settlementTx: "0xfilled" };
+    }),
+  };
+
+  const errors: string[] = [];
+  const mockLogger: Logger = {
+    info: () => {},
+    warn: () => {},
+    error: (msg) => errors.push(msg),
+  };
+
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => [] })) as any;
+
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
+  const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(
+    solver,
+  );
+
+  await consider(recordA);
+  assert.ok(errors.some((e) => e.includes("fill failed")), "intentA's fill should have failed");
+
+  // intentA's failed reservation must be released — intentB can still fill
+  // against the same balance.
+  await consider(recordB);
+  assert.equal(
+    (mockExecutor.fill as ReturnType<typeof mock.fn>).mock.callCount(),
+    2,
+    "intentB's fill should have been attempted after intentA's reservation was released",
+  );
+});

@@ -17,6 +17,7 @@ import { evaluate, type PricingDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
 import type { Metrics } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
+import { InFlightTracker } from "./inventory.js";
 import { SeenLRU } from "./seen-lru.js";
 
 /** Pluggable execution backend — abstracts the two settlement legs. */
@@ -186,6 +187,9 @@ export class Solver {
    */
   private readonly seen: SeenLRU;
   private readonly verificationCache: VerificationCache;
+  /** Tracks capital committed to fills that are in flight, so a stale on-chain
+   * balance read cannot let a second intent over-commit the same inventory. */
+  private readonly inFlight = new InFlightTracker();
   private readonly retryState = new Map<string, RetryState>();
   private running = false;
   private readonly backoff: BackoffState;
@@ -314,10 +318,15 @@ export class Solver {
       return;
     }
 
-    const decision = await evaluate(intent, this.config, {
-      ...this.pricingDeps,
-      availableBalance: this.inventory?.availableBalance.bind(this.inventory),
-    });
+    const decision = await evaluate(
+      intent,
+      this.config,
+      {
+        ...this.pricingDeps,
+        availableBalance: this.inventory?.availableBalance.bind(this.inventory),
+      },
+      this.inFlight,
+    );
     if (!decision.fill) {
       this.log.info("skipping intent", { hash, reason: decision.reason });
       this.metrics?.recordSkip(decision.reason);
@@ -326,6 +335,8 @@ export class Solver {
 
     this.log.info("filling intent", { hash, profitBps: decision.profitBps });
     this.metrics?.recordFillAttempt(intent.destAsset);
+    const reserved = BigInt(intent.minDestAmount);
+    this.inFlight.reserve(intent.destAsset, reserved);
     try {
       const { settlementTx } = await this.executor.fill(record);
       this.log.info("filled", { hash, settlementTx });
@@ -342,6 +353,8 @@ export class Solver {
       this.log.error("fill failed", { hash, err: String(err) });
       this.metrics?.recordFillLost(intent.destAsset, String(err));
       this.scheduleRetry(hash, deadlineMs);
+    } finally {
+      this.inFlight.release(intent.destAsset, reserved);
     }
   }
 
