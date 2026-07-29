@@ -13,6 +13,7 @@ import type {
   Intent,
   IntentRecord,
   IntentStatus,
+  MempoolIntentStatus,
   SignedIntent,
 } from "./types.js";
 
@@ -25,10 +26,8 @@ export class MempoolResponseError extends Error {
 }
 
 const HEX_RE = /^0x[0-9a-fA-F]+$/;
-const INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set([
+const MEMPOOL_STATUSES: ReadonlySet<MempoolIntentStatus> = new Set([
   "pending",
-  "claimed",
-  "settling",
   "settled",
   "refunded",
   "expired",
@@ -139,9 +138,9 @@ export function parseIntentRecord(value: unknown): IntentRecord {
   const v = asObject(value, "intent record");
   const signed = parseSignedIntent(v);
 
-  if (typeof v.status !== "string" || !INTENT_STATUSES.has(v.status as IntentStatus)) {
+  if (typeof v.status !== "string" || !MEMPOOL_STATUSES.has(v.status as MempoolIntentStatus)) {
     throw new MempoolResponseError(
-      `'status' must be one of ${[...INTENT_STATUSES].join(", ")} (got ${JSON.stringify(v.status)})`,
+      `'status' must be one of ${[...MEMPOOL_STATUSES].join(", ")} (got ${JSON.stringify(v.status)})`,
     );
   }
   if (v.solver !== undefined) asAddress(v.solver, "solver");

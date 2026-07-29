@@ -61,6 +61,9 @@ export type IntentStatus =
   | "refunded" // deadline passed / failed; source funds returned
   | "expired"; // deadline passed before any claim
 
+/** Subset of IntentStatus values that the mempool can represent. */
+export type MempoolIntentStatus = Extract<IntentStatus, "pending" | "settled" | "refunded" | "expired">;
+
 /** An intent together with its signature and current status. */
 export interface SignedIntent {
   readonly intent: Intent;

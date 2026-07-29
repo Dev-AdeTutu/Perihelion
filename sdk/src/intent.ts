@@ -53,7 +53,7 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
 /** Thrown by {@link validateIntent} and {@link buildIntent} when a field is malformed. */
-export class IntentValidationError extends Error {
+export class IntentValidationError extends RangeError {
   readonly field: string;
   constructor(field: string, message: string) {
     super(`[Perihelion] Invalid '${field}': ${message}`);
@@ -124,6 +124,18 @@ export function validateIntent(
       `must be a positive integer string with no leading zeros (got '${params.sourceAmount}')`,
     );
   }
+  try {
+    const sourceAmountBig = BigInt(params.sourceAmount);
+    if (sourceAmountBig > U128_MAX) {
+      throw new IntentValidationError(
+        "sourceAmount",
+        `exceeds maximum bridgeable amount (${U128_MAX})`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof IntentValidationError) throw err;
+    throw new IntentValidationError("sourceAmount", `is not a valid integer string`);
+  }
   if (!DEST_ASSET_RE.test(params.destAsset)) {
     throw new IntentValidationError(
       "destAsset",
@@ -138,16 +150,48 @@ export function validateIntent(
       `exceeds ${MAX_DEST_ASSET_LEN} bytes (got ${destAssetBytes} bytes)`,
     );
   }
-  if (!isNonNegIntString(params.minDestAmount)) {
+  if (!isPositiveIntString(params.minDestAmount)) {
     throw new IntentValidationError(
       "minDestAmount",
-      `must be a non-negative integer string with no leading zeros (got '${params.minDestAmount}')`,
+      `must be a positive integer string with no leading zeros (got '${params.minDestAmount}')`,
     );
+  }
+  try {
+    const minDestAmountBig = BigInt(params.minDestAmount);
+    if (minDestAmountBig > I128_MAX) {
+      throw new IntentValidationError(
+        "minDestAmount",
+        `exceeds maximum bridgeable amount (${I128_MAX})`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof IntentValidationError) throw err;
+    throw new IntentValidationError("minDestAmount", `is not a valid integer string`);
   }
   if (!Number.isInteger(params.deadline) || params.deadline <= now) {
     throw new IntentValidationError(
       "deadline",
       `must be a Unix timestamp strictly in the future (got ${params.deadline}, now is ${now})`,
+    );
+  }
+  if (params.nonce !== undefined) {
+    if (!isNonNegIntString(params.nonce)) {
+      throw new IntentValidationError(
+        "nonce",
+        `must be a non-negative decimal integer string (got '${params.nonce}')`,
+      );
+    }
+    if (BigInt(params.nonce) > (1n << 256n) - 1n) {
+      throw new IntentValidationError(
+        "nonce",
+        `exceeds uint256 maximum (got ${params.nonce})`,
+      );
+    }
+  }
+  if (params.preferredSolver !== undefined && !isAddress(params.preferredSolver)) {
+    throw new IntentValidationError(
+      "preferredSolver",
+      `must be a valid 20-byte EVM address or zero address (got '${params.preferredSolver}')`,
     );
   }
 }
@@ -212,18 +256,15 @@ export function validateAmount(value: string, field: string, max = I128_MAX): vo
   try {
     n = BigInt(value);
   } catch {
-    throw new RangeError(`[Perihelion] ${field} "${value}" is not a valid integer string`);
+    throw new IntentValidationError(field, `is not a valid integer string`);
   }
   if (n <= 0n) {
-    throw new RangeError(
-      `[Perihelion] ${field} must be > 0 (got ${value})`
-    );
+    throw new IntentValidationError(field, `must be > 0 (got ${value})`);
   }
   if (n > max) {
-    throw new RangeError(
-      `[Perihelion] ${field} ${value} exceeds the maximum bridgeable amount ` +
-        `(${max}). Values above this cannot be encoded in the 16-byte wire field ` +
-        `or stored as i128 on Soroban.`
+    throw new IntentValidationError(
+      field,
+      `exceeds maximum bridgeable amount (${max})`
     );
   }
 }
@@ -232,6 +273,8 @@ export function validateAmount(value: string, field: string, max = I128_MAX): vo
 export interface BuildOptions {
   /** Minimum notional (in source-asset smallest units) below which a warning is emitted. */
   vMin?: string;
+  /** Decimal places of the source asset (e.g. 6 for USDC, 18 for WETH). Required to validate vMin. */
+  sourceDecimals?: number;
   /** If true, suppress the warning even if below vMin. */
   suppressWarning?: boolean;
 }
@@ -272,13 +315,20 @@ export function buildIntent(params: IntentParams, options?: BuildOptions): Inten
   validateAmount(intent.sourceAmount, "sourceAmount", U128_MAX);
   validateAmount(intent.minDestAmount, "minDestAmount", I128_MAX);
 
-  // Warn if below minimum economical size
-  if (!suppressWarning && BigInt(intent.sourceAmount) < BigInt(vMin)) {
-    console.warn(
-      `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
-        `economical minimum V_min (${vMin}). The fixed LayerZero messaging fee may ` +
-        `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
-    );
+  // Warn if below minimum economical size.
+  // The vMin check requires knowing the source asset's decimal places to make
+  // a meaningful comparison across different token precisions. Without sourceDecimals,
+  // we skip the check to avoid spurious or missing warnings for mismatched decimals.
+  if (!suppressWarning && options?.sourceDecimals !== undefined) {
+    const vMinBig = BigInt(vMin);
+    const sourceAmountBig = BigInt(intent.sourceAmount);
+    if (sourceAmountBig < vMinBig) {
+      console.warn(
+        `[Perihelion] Intent source amount (${intent.sourceAmount}) is below the ` +
+          `economical minimum V_min (${vMin}). The fixed LayerZero messaging fee may ` +
+          `make this intent unprofitable to fill. Override via buildIntent(..., { vMin, suppressWarning }).`
+      );
+    }
   }
 
   return intent;

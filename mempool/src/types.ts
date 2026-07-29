@@ -1,11 +1,8 @@
-import type { Hex, Intent, SignedIntent } from "@perihelion/sdk";
+import type { Hex, Intent, SignedIntent, MempoolIntentStatus } from "@perihelion/sdk";
 
-export type IntentStatus = "pending" | "settled" | "refunded" | "expired";
+export type IntentStatus = MempoolIntentStatus;
 
-export interface MempoolIntentRecord {
-  hash: Hex;
-  intent: Intent;
-  signature: Hex;
+export interface MempoolIntentRecord extends SignedIntent {
   status: IntentStatus;
-  submittedAt: number;
+  createdAt: number;
 }
