@@ -169,7 +169,9 @@ infrastructure:
 // In your test / integration harness (Node.js):
 import { MempoolServer } from "@perihelion/mempool";
 
-const server = new MempoolServer({ port: 3001 });
+// chainId and verifyingContract are required and must match the domain
+// used to sign intents (see CHAIN_ID / ESCROW_ADDRESS above).
+const server = new MempoolServer({ port: 3001, chainId: CHAIN_ID, verifyingContract: ESCROW_ADDRESS });
 await server.start();
 
 // … submit an intent via the client …

@@ -32,15 +32,16 @@ const INTENT_STATUSES: ReadonlySet<string> = new Set([
 export interface MempoolServerOptions {
   port?: number;
   host?: string;
-  /** EVM chain ID the escrow is deployed on. Binds the EIP-712 domain. */
-  chainId?: number;
-  /** PerihelionEscrow contract address. Binds the EIP-712 domain. */
-  verifyingContract?: Address;
+  /** EVM chain ID the escrow is deployed on. Binds the EIP-712 domain. Required. */
+  chainId: number;
+  /** PerihelionEscrow contract address. Binds the EIP-712 domain. Required. */
+  verifyingContract: Address;
 }
 
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 1000;
 const SWEEP_INTERVAL_MS = 30_000;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export class MempoolServer {
   private app = express();
@@ -52,22 +53,32 @@ export class MempoolServer {
   private rateLimitHits = new Map<string, number[]>();
   private sweepTimer?: ReturnType<typeof setInterval>;
 
-  constructor(opts: MempoolServerOptions = {}) {
+  constructor(opts: MempoolServerOptions) {
+    if (opts.chainId === undefined || opts.chainId === null || Number.isNaN(opts.chainId)) {
+      throw new Error("MempoolServer requires a chainId — omitting it defaults signature verification to no real domain.");
+    }
+    if (!opts.verifyingContract || opts.verifyingContract.toLowerCase() === ZERO_ADDRESS) {
+      throw new Error(
+        "MempoolServer requires a non-zero verifyingContract (escrow address) — the zero address verifies against no deployed contract.",
+      );
+    }
     this.port = opts.port ?? 3000;
     this.host = opts.host ?? "localhost";
-    this.domain = perihelionDomain(
-      opts.chainId ?? 8453,
-      opts.verifyingContract ?? "0x0000000000000000000000000000000000000000",
-    );
+    this.domain = perihelionDomain(opts.chainId, opts.verifyingContract);
     this.setupRoutes();
   }
 
   private setupRoutes(): void {
     this.app.use(express.json({ limit: "8kb" }));
 
+    this.app.get("/info", this.handleInfo.bind(this));
     this.app.post("/intents", this.rateLimit.bind(this), this.handleSubmitIntent.bind(this));
     this.app.get("/intents/:hash", this.handleGetIntent.bind(this));
     this.app.get("/intents", this.handleListIntents.bind(this));
+  }
+
+  private handleInfo(_req: Request, res: Response): void {
+    res.json({ chainId: this.domain.chainId, verifyingContract: this.domain.verifyingContract });
   }
 
   /** Rejects an IP once it exceeds a fixed request budget within a sliding window. */
@@ -108,6 +119,13 @@ export class MempoolServer {
 
       if (isExpired(intent)) {
         res.status(400).json({ error: "Intent already expired" });
+        return;
+      }
+
+      if (signed.intent.sourceChainId !== this.domain.chainId) {
+        res.status(400).json({
+          error: `Chain ID mismatch: intent is for chain ${signed.intent.sourceChainId}, mempool is configured for chain ${this.domain.chainId}`,
+        });
         return;
       }
 
@@ -189,7 +207,10 @@ export class MempoolServer {
       this.sweepTimer = setInterval(() => this.store.evictExpired(), SWEEP_INTERVAL_MS);
       this.sweepTimer.unref?.();
       this.server = this.app.listen(this.port, this.host, () => {
-        console.log(`Mempool server listening on http://${this.host}:${this.port}`);
+        console.log(
+          `Mempool server listening on http://${this.host}:${this.port} ` +
+            `(chainId=${this.domain.chainId}, escrow=${this.domain.verifyingContract})`,
+        );
         resolve();
       });
     });
