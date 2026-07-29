@@ -376,7 +376,6 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
     b.append(&Bytes::from_array(env, &[0u8; 32]));
     b
 }
-}
 
 /// Decode a `CancelIntent` payload (35 bytes):
 /// `version(1) | type(1) | intent_hash(32) | reason(1)`.
@@ -416,8 +415,10 @@ fn decode_cancel_intent(
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::string::ToString;
+
     use super::*;
-    use soroban_sdk::testutils::Env as _;
 
     // A known valid G... account strkey (all-zeros account).
     const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -463,25 +464,25 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// decode_fill_instruction requires exactly 158 bytes.
+    /// decode_fill_instruction requires exactly 219 bytes.
     #[test]
     fn test_decode_fill_instruction_wrong_length_rejected() {
         let env = Env::default();
         let mut short = Bytes::new(&env);
-        for _ in 0..157u32 {
+        for _ in 0..218u32 {
             short.push_back(0x00);
         }
         let result = decode_fill_instruction(&env, &short);
         assert!(result.is_err());
     }
 
-    /// A well-formed 158-byte FillInstruction with G... recipient and C... dest_asset decodes
+    /// A well-formed 219-byte FillInstruction with G... recipient and C... dest_asset decodes
     /// correctly using from_string_bytes (not from_contract_id).
     #[test]
     fn test_decode_fill_instruction_strkey_addresses() {
         let env = Env::default();
 
-        // Build a 158-byte payload manually.
+        // Build a 219-byte payload manually.
         let mut msg = Bytes::new(&env);
 
         // version + type
@@ -499,15 +500,17 @@ mod tests {
         msg.push_back(0x00);
         msg.push_back(0x01);
 
-        // recipient (32 bytes): first 32 chars of ZERO_ACCOUNT right-zero-padded
+        // recipient (56 bytes): Use a real G... account strkey (ZERO_ACCOUNT).
+        // Stellar strkeys are exactly 56 ASCII characters; no zero-padding needed.
         let recip_bytes = ZERO_ACCOUNT.as_bytes();
-        for i in 0..32usize {
+        for i in 0..56usize {
             msg.push_back(if i < recip_bytes.len() { recip_bytes[i] } else { 0 });
         }
 
-        // dest_asset (32 bytes): first 32 chars of ZERO_CONTRACT right-zero-padded
+        // dest_asset (69 bytes): Use a real C... contract strkey (ZERO_CONTRACT).
+        // ZERO_CONTRACT is 56 chars; pad the remaining 13 bytes with zeros.
         let asset_bytes = ZERO_CONTRACT.as_bytes();
-        for i in 0..32usize {
+        for i in 0..69usize {
             msg.push_back(if i < asset_bytes.len() { asset_bytes[i] } else { 0 });
         }
 
@@ -528,7 +531,7 @@ mod tests {
             msg.push_back(0x00);
         }
 
-        assert_eq!(msg.len(), 158);
+        assert_eq!(msg.len(), 219);
 
         let fi = decode_fill_instruction(&env, &msg).expect("should decode valid payload");
         assert_eq!(fi.src_eid, 1);
