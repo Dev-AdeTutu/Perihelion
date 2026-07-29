@@ -13,7 +13,7 @@ import {
   type Hex,
 } from "@perihelion/sdk";
 import type { SolverConfig } from "./config.js";
-import { evaluate } from "./quote.js";
+import { evaluate, type PricingDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
 import type { Metrics } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
@@ -42,10 +42,6 @@ export interface Logger {
  * (the ESM namespace itself is frozen and cannot be monkeypatched).
  */
 export type IntentVerifier = typeof verifyIntent;
-
-// ---------------------------------------------------------------------------
-// LRU + TTL cache for the seen set
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // LRU cache for signature verification results
@@ -155,6 +151,8 @@ export class Solver {
     private readonly metrics?: Metrics,
     private readonly inventory?: InventoryProvider,
     private readonly verifier: IntentVerifier = verifyIntent,
+    /** Injectable pricing overrides (priceOracle/feeEstimator/decimalsLookup), merged with `inventory` when evaluating. */
+    private readonly pricingDeps?: PricingDeps,
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
     this.backoff = new BackoffState(config);
@@ -262,7 +260,10 @@ export class Solver {
       return;
     }
 
-    const decision = await evaluate(intent, this.config, this.inventory);
+    const decision = await evaluate(intent, this.config, {
+      ...this.pricingDeps,
+      availableBalance: this.inventory?.availableBalance.bind(this.inventory),
+    });
     if (!decision.fill) {
       this.log.info("skipping intent", { hash, reason: decision.reason });
       this.metrics?.recordSkip(decision.reason);
@@ -314,11 +315,4 @@ export class Solver {
       };
     });
   }
-
-  /** Expose pricing deps for testing — set by subclasses or tests. */
-  protected readonly pricingDeps: Parameters<typeof evaluate>[2] = undefined;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
