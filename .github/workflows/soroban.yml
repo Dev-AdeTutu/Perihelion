@@ -45,10 +45,12 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Unit tests
-        run: cargo test
+        working-directory: .
+        run: make test-soroban
 
       - name: Build wasm (release)
-        run: cargo build --target wasm32-unknown-unknown --release
+        working-directory: .
+        run: make build-soroban
 
   # Required gate for branch protection on the Soroban workflow.
   # Passes when the soroban job succeeds or is skipped; fails if it fails/cancels.

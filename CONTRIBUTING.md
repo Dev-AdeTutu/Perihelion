@@ -26,18 +26,42 @@ By participating, you agree to abide by our
 
 ## Development setup
 
+You only need the toolchain(s) for the stack you're actually touching — see the
+root [`Makefile`](./Makefile) preamble. Run `make doctor` at any time to check
+which toolchains are installed and whether their versions match what's pinned
+(`.nvmrc`, `rust-toolchain.toml`, and the Foundry version pinned in
+`.github/workflows/evm.yml`):
+
+```bash
+make doctor
+```
+
 ```bash
 # TypeScript workspaces (sdk, solver, relayer)
 npm install
-npm run build
-npm test
+make build-ts
+make test-ts
 
 # Soroban contracts
-( cd contracts/soroban && cargo test )
+make build-soroban
+make test-soroban
 
 # EVM contracts
-( cd contracts/evm && forge install foundry-rs/forge-std && forge test )
+( cd contracts/evm && forge install foundry-rs/forge-std )
+make build-evm
+make test-evm
 ```
+
+`make build` / `make test` run all three stacks but **gracefully skip** any
+stack whose toolchain isn't installed locally (printing a `⏭ skipping ...`
+notice) — a contributor without Rust or Foundry installed can still run
+`make build`/`make test` and get useful results for the stack(s) they have.
+CI instead uses `make build-ts`/`make test-soroban`/etc. directly inside each
+stack's dedicated job (where that job's toolchain is guaranteed to be
+installed), or `make build-all-strict` / `make test-all-strict`, which
+require **all three** toolchains and fail fast with a clear error if any are
+missing — use these if you want a genuinely all-stacks build/test that never
+silently skips anything.
 
 ## Pre-commit hooks (optional but recommended)
 
