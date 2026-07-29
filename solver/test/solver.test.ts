@@ -97,7 +97,7 @@ test("verifies signature only once for the same intent hash", async () => {
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
@@ -146,7 +146,7 @@ test("rejects intent with hash mismatch", async () => {
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger);
@@ -186,7 +186,7 @@ test("caches invalid signatures to avoid re-verification within the negative TTL
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
@@ -247,7 +247,7 @@ test("corrected resubmission with a valid signature is verified and filled", asy
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => pendingRecords,
+    json: async () => ({ records: pendingRecords, nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
@@ -292,7 +292,7 @@ test("negative verification cache entries expire, allowing re-verification", asy
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const originalNow = Date.now;
@@ -359,7 +359,7 @@ test("two different signatures over the same hash do not share a cache entry", a
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => pendingRecords,
+    json: async () => ({ records: pendingRecords, nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
@@ -431,7 +431,7 @@ test("verification cache evicts oldest entries when full", async () => {
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => pendingRecords,
+    json: async () => ({ records: pendingRecords, nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger, undefined, zeroInventory, mockVerify, testPricingDeps);
@@ -502,7 +502,7 @@ test("terminal skip (expired intent) is retired to the seen-set, not reconsidere
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(
@@ -546,7 +546,7 @@ test("terminal skip survives evictExpired() despite the intent's own deadline be
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(
@@ -595,7 +595,7 @@ test("recoverable tick error keeps loop alive, does not reject start()", async (
     calls++;
     if (calls === 1) throw new Error("transient network blip");
     // Second call: return empty list so stop() resolves start()
-    return { ok: true, status: 200, json: async () => [] };
+    return { ok: true, status: 200, json: async () => ({ records: [], nextCursor: undefined }) };
   }) as any;
 
   const solver = new Solver(
@@ -616,7 +616,7 @@ test("stop() interrupts inter-tick sleep so start() resolves promptly", async ()
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [],
+    json: async () => ({ records: [], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(
@@ -671,7 +671,7 @@ test("complete flow: hash validation and cached verification", async () => {
   global.fetch = mock.fn(async () => ({
     ok: true,
     status: 200,
-    json: async () => [record],
+    json: async () => ({ records: [record], nextCursor: undefined }),
   })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
@@ -714,7 +714,7 @@ test("consider: reserves inventory before filling, preventing a second intent fr
   };
 
   const mockLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
-  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => [] })) as any;
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => ({ records: [], nextCursor: undefined }) })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
   const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(
@@ -769,7 +769,7 @@ test("consider: releases the reservation when a fill fails, freeing capacity for
     error: (msg) => errors.push(msg),
   };
 
-  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => [] })) as any;
+  global.fetch = mock.fn(async () => ({ ok: true, status: 200, json: async () => ({ records: [], nextCursor: undefined }) })) as any;
 
   const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, inventory, async () => true, testPricingDeps);
   const consider = (solver as unknown as { consider(record: IntentRecord): Promise<void> }).consider.bind(

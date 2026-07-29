@@ -138,17 +138,46 @@ export class PerihelionClient {
   }
 
   /**
-   * List intents filtered by status.
-   * Defaults to `"pending"`, which is the primary solver use-case.
+   * List intents filtered by status, following pagination cursors until all
+   * pages are exhausted. Defaults to `"pending"`, which is the primary solver
+   * use-case.
+   *
+   * The server caps each page at `DEFAULT_LIST_LIMIT` (100) records and
+   * returns a `nextCursor` when more remain. This method accumulates all pages
+   * so callers always see the full result set, regardless of how many intents
+   * are in the mempool. A `maxPages` guard (default 100) prevents a
+   * misbehaving server from looping the client forever.
+   *
+   * For callers that need explicit pagination control (e.g. a solver that wants
+   * to rate-limit its own page fetches), use {@link listPendingPage} directly.
    */
-  async listPending(status: IntentStatus = "pending"): Promise<IntentRecord[]> {
-    const url = `${this.base}/intents?status=${encodeURIComponent(status)}`;
-    const res = await this.fetchWithRetry(url, {});
-    if (!res.ok) {
-      throw new PerihelionHttpError("listPending", res.status, await res.text());
-    }
-    const body = (await res.json()) as { records?: unknown };
-    return parseIntentRecordArray(body.records);
+  async listPending(
+    status: IntentStatus = "pending",
+    maxPages = 100,
+  ): Promise<IntentRecord[]> {
+    const all: IntentRecord[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+
+    do {
+      const qs = new URLSearchParams({ status });
+      if (cursor) qs.set("cursor", cursor);
+      const url = `${this.base}/intents?${qs}`;
+
+      const res = await this.fetchWithRetry(url, {});
+      if (!res.ok) {
+        throw new PerihelionHttpError("listPending", res.status, await res.text());
+      }
+
+      const body = (await res.json()) as { records?: unknown; nextCursor?: unknown };
+      const page = parseIntentRecordArray(body.records);
+      all.push(...page);
+
+      cursor = typeof body.nextCursor === "string" ? body.nextCursor : undefined;
+      pages++;
+    } while (cursor !== undefined && pages < maxPages);
+
+    return all;
   }
 
   /**
