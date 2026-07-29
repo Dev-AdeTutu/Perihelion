@@ -123,3 +123,21 @@ jobs:
             exit 1
           fi
           echo "NatSpec check passed."
+
+  # Required gate for branch protection on the EVM workflow.
+  # Passes when all EVM jobs succeed or are skipped; fails if any fail/cancel.
+  check:
+    name: Required check
+    runs-on: ubuntu-latest
+    needs: [evm, slither, natspec]
+    if: always()
+    steps:
+      - name: Assert all EVM jobs passed or were skipped
+        run: |
+          for result in "${{ needs.evm.result }}" "${{ needs.slither.result }}" "${{ needs.natspec.result }}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "::error::An EVM job $result — merge is blocked."
+              exit 1
+            fi
+          done
+          echo "All EVM jobs passed or were skipped — gate passes."

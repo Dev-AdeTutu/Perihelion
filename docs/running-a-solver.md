@@ -101,7 +101,14 @@ For production use, you likely need to customize:
    - Integrate external DEX pricing (e.g., CoinGecko, Uniswap, 1inch)
    - Account for your own inventory levels and risk
 
-2. **Executor configuration** — Wire real settlement legs:
+2. **`quote.ts:defaultFeeEstimator()`** — This defaults to `0n` (no fees). Supply a
+   real `feeEstimator` (source-chain gas + LayerZero + Stellar resource fee, in
+   dest-asset units) via `EvaluateDeps` before running against real capital, or
+   every intent will be priced as if settlement were free. `PERIHELION_MIN_MARGIN_BPS`
+   is enforced against the fee-inclusive margin, so an accurate fee estimate is
+   required for that gate to mean anything.
+
+3. **Executor configuration** — Wire real settlement legs:
    - Ensure your EVM account can sign transactions on the source chain
    - Verify Stellar keypair has funds for transaction fees
    - Test the integration against a testnet first (see [Deployment & Operations](./deployment.md))

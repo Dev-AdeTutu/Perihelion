@@ -6,6 +6,7 @@
  */
 
 import { isAddress } from "viem";
+import { isStellarAddress, isStellarAsset } from "./stellar.js";
 import type {
   Address,
   Hex,
@@ -76,19 +77,49 @@ function asHex(value: unknown, field: string): Hex {
   return value;
 }
 
+function asStellarAddress(value: unknown, field: string): string {
+  const s = asString(value, field);
+  if (!isStellarAddress(s)) {
+    throw new MempoolResponseError(
+      `'${field}' must be a valid Stellar strkey (got ${JSON.stringify(s)})`
+    );
+  }
+  return s;
+}
+
+function asStellarAsset(value: unknown, field: string): string {
+  const s = asString(value, field);
+  if (!isStellarAsset(s)) {
+    throw new MempoolResponseError(
+      `'${field}' must be a valid Stellar asset identifier (got ${JSON.stringify(s)})`
+    );
+  }
+  return s;
+}
+
+function asIntegerString(value: unknown, field: string): string {
+  const s = asString(value, field);
+  if (!/^(?:0|[1-9][0-9]*)$/.test(s)) {
+    throw new MempoolResponseError(
+      `'${field}' must be a valid non-negative integer string (got ${JSON.stringify(s)})`
+    );
+  }
+  return s;
+}
+
 /** Validate and narrow an unknown value into an {@link Intent}. */
 export function parseIntent(value: unknown): Intent {
   const v = asObject(value, "'intent'");
   return {
     user: asAddress(v.user, "intent.user"),
-    destination: asString(v.destination, "intent.destination"),
+    destination: asStellarAddress(v.destination, "intent.destination"),
     sourceChainId: asFiniteNumber(v.sourceChainId, "intent.sourceChainId"),
     sourceAsset: asAddress(v.sourceAsset, "intent.sourceAsset"),
-    sourceAmount: asString(v.sourceAmount, "intent.sourceAmount"),
-    destAsset: asString(v.destAsset, "intent.destAsset"),
-    minDestAmount: asString(v.minDestAmount, "intent.minDestAmount"),
+    sourceAmount: asIntegerString(v.sourceAmount, "intent.sourceAmount"),
+    destAsset: asStellarAsset(v.destAsset, "intent.destAsset"),
+    minDestAmount: asIntegerString(v.minDestAmount, "intent.minDestAmount"),
     deadline: asFiniteNumber(v.deadline, "intent.deadline"),
-    nonce: asString(v.nonce, "intent.nonce"),
+    nonce: asIntegerString(v.nonce, "intent.nonce"),
     preferredSolver: asAddress(v.preferredSolver, "intent.preferredSolver"),
   };
 }

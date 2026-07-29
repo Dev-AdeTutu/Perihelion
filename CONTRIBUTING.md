@@ -116,6 +116,34 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
 - For `contracts/` changes: a note on resource/fee impact and whether an audit
   gate applies before mainnet.
 
+## Branch protection on `main`
+
+`main` is protected by three required status checks. These must be configured in
+**Settings → Branches → Branch protection rules** (or Rulesets) for `main`:
+
+| Required check name | Source workflow | Blocks merge when… |
+|---|---|---|
+| `Required check` (CI / `ci.yml`) | `.github/workflows/ci.yml` | `npm run build` or `npm test` fails |
+| `Required check` (EVM / `evm.yml`) | `.github/workflows/evm.yml` | `forge build`, `forge test`, Slither, or NatSpec check fails |
+| `Required check` (Soroban / `soroban.yml`) | `.github/workflows/soroban.yml` | `cargo build`, `cargo test`, or `cargo clippy` fails |
+
+Additional required settings:
+
+- **Require branches to be up to date before merging** — enabled, so a stale
+  branch cannot bypass a check that passed on an older base commit.
+- **Do not allow bypassing the above settings** — admin bypass **must be
+  disabled**. An admin merge that skips required checks is how the refund-helper
+  regression reached `main`.
+- **Require review from Code Owners** — enabled for the security-sensitive paths
+  listed in the Security review policy below.
+
+> How the gate works: each workflow contains a terminal `check` job
+> (`needs: [<real-jobs>]`, `if: always()`) that asserts every upstream job
+> either passed or was skipped. Branch protection requires only those `check`
+> jobs, not the individual matrix jobs. This means a docs-only PR gets a green
+> gate without running the full build suite, while any build/test failure blocks
+> the merge.
+
 ## Reporting bugs & security issues
 
 - **Non-security bugs:** open an issue using the Bug Report template.

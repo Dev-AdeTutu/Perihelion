@@ -37,6 +37,9 @@ pub enum DataKey {
     /// operations for that corridor are blocked independently of the global flag.
     /// Allows quarantining a single compromised chain without halting others.
     PausedEid(u32),
+    /// Native token (SAC) address for the settlement network (Testnet, Futurenet, or Pubnet).
+    /// Required to pay keeper rewards. Issue #173.
+    NativeToken,
     /// Keeper reward in stroops (Stellar's smallest unit) paid to callers of
     /// `cancel_expired_intent`. Incentivizes timely refund processing (issue #173).
     KeeperReward,
@@ -146,13 +149,20 @@ pub struct Origin {
     pub nonce: u64,
 }
 
+/// Stellar recipient type codes used in FillInstruction wire format.
+pub const RECIPIENT_TYPE_ACCOUNT: u8 = 0x30; // G... account (0x06 << 3)
+pub const RECIPIENT_TYPE_CONTRACT: u8 = 0x10; // C... contract (0x02 << 3)
+
 /// A registration instruction from the source chain (FillInstruction), decoded
 /// at the endpoint/adapter boundary into native Soroban types.
 ///
-/// NOTE: in the interface+mock phase, the LayerZero adapter is responsible for
-/// decoding the raw wire bytes into this struct (carrying `recipient`/`dest_asset`
-/// as Stellar addresses). The raw inbound byte codec is finalized once the
-/// Soroban LayerZero ABI is GA; see the architecture spec §3.3.
+/// Wire format (159 bytes):
+///   version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient_type(1)
+///   | recipient_key(32) | dest_asset_type(1) | dest_asset_key(32)
+///   | min_dest_amount(16) | deadline(8) | preferred_solver(32)
+///
+/// Recipient and dest_asset are decoded from their strkey form (version byte + 32-byte key)
+/// into Soroban Address objects at the adapter boundary.
 #[contracttype]
 #[derive(Clone)]
 pub struct FillInstruction {

@@ -189,7 +189,9 @@ export class PerihelionClient {
       }
       if (terminal.has(record.status)) return record;
 
-      await sleep(Math.min(interval, deadline - Date.now()));
+      const remainingAfterPoll = deadline - Date.now();
+      if (remainingAfterPoll <= 0) continue;
+      await sleep(Math.min(interval, remainingAfterPoll));
     }
   }
 
@@ -228,7 +230,7 @@ export class PerihelionClient {
     confirmationGraceMs: number = 2 * 60 * 60 * 1_000,
   ): boolean {
     // Must not have been settled or refunded already.
-    if (record.status !== "pending" && record.status !== "locked") {
+    if (record.status === "settled" || record.status === "refunded") {
       return false;
     }
     // Deadline + grace must have passed (in seconds; convert ms to s for comparison).
@@ -299,16 +301,14 @@ function isAbortError(e: unknown): boolean {
 /**
  * Combine two optional AbortSignals so that either aborting aborts the result.
  * Returns undefined if both are undefined.
+ * Uses AbortSignal.any for proper teardown of listeners.
  */
 function combineSignals(
   a: AbortSignal | undefined,
   b: AbortSignal | undefined,
 ): AbortSignal | undefined {
-  if (!a) return b;
-  if (!b) return a;
-  const ctrl = new AbortController();
-  const abort = () => ctrl.abort();
-  a.addEventListener("abort", abort, { once: true });
-  b.addEventListener("abort", abort, { once: true });
-  return ctrl.signal;
+  const signals = [a, b].filter((s): s is AbortSignal => s != null);
+  if (signals.length === 0) return undefined;
+  if (signals.length === 1) return signals[0];
+  return AbortSignal.any(signals);
 }

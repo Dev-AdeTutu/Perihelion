@@ -55,7 +55,9 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 // | `admin_transfer_started` | ("admin_transfer_started",)      | (old: Address, new: Address)                     |
 // | `admin_transfer_completed` | ("admin_transfer_completed",)  | (old: Address, new: Address)                     |
 // | `paused_set`           | ("paused_set",)                  | (paused: bool)                                   |
+// | `native_token_set`     | ("native_token_set",)            | (native_token: Address)                          |
 // | `keeper_reward_set`    | ("keeper_reward_set",)           | (reward: i128)                                   |
+// | `keeper_reward_paid`   | ("keeper_reward_paid", intent_hash) | (caller: Address, reward: i128)               |
 // | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
 // | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
 // | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
@@ -99,7 +101,7 @@ pub struct Perihelion;
 
 #[contractimpl]
 impl Perihelion {
-    /// Initialize with an admin and the trusted LayerZero endpoint.
+    /// Initialize with an admin, the trusted LayerZero endpoint, and the native token address.
     ///
     /// # Validation (issue #18)
     /// - `admin` and `endpoint` must be distinct addresses. Conflating them
@@ -115,10 +117,13 @@ impl Perihelion {
     ///   contract deployed on Stellar that calls `lz_receive`.
     /// - `admin`: typically an **account** (keypair) or a multisig/timelock
     ///   contract. Should never be the same address as `endpoint`.
+    /// - `native_token`: the SAC (Stellar Asset Contract) address for the native
+    ///   token on the current network. Differs by network (Testnet, Futurenet, Pubnet).
+    ///   Used to pay keeper rewards. Issue #173.
     ///
     /// Emits an `initialized` event so deployment tooling can confirm the
     /// configured values without polling storage.
-    pub fn initialize(env: Env, admin: Address, endpoint: Address) -> Result<(), PerihelionError> {
+    pub fn initialize(env: Env, admin: Address, endpoint: Address, native_token: Address) -> Result<(), PerihelionError> {
         let storage = env.storage().instance();
         if storage.has(&DataKey::Admin) {
             return Err(PerihelionError::AlreadyInitialized);
@@ -129,6 +134,7 @@ impl Perihelion {
         }
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Endpoint, &endpoint);
+        storage.set(&DataKey::NativeToken, &native_token);
         storage.set(&DataKey::Paused, &false);
         // Issue #173: initialize keeper reward to 0. Admin must call set_keeper_reward
         // to enable keeper incentives for cancel_expired_intent.
@@ -369,6 +375,26 @@ impl Perihelion {
             (reward,),
         );
         Ok(())
+    }
+
+    /// Set the native token (SAC) address. Admin-only. Required for keeper reward
+    /// payouts. The address differs per network (Testnet, Futurenet, Pubnet).
+    /// Issue #173.
+    pub fn set_native_token(env: Env, native_token: Address) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::NativeToken, &native_token);
+        env.events().publish(
+            (Symbol::new(&env, "native_token_set"),),
+            (native_token,),
+        );
+        Ok(())
+    }
+
+    /// Get the native token address. Returns None if not yet configured.
+    pub fn native_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::NativeToken)
     }
 
     // --- LayerZero inbound -----------------------------------------------------
@@ -732,12 +758,25 @@ impl Perihelion {
             .get(&DataKey::KeeperReward)
             .unwrap_or(0);
         if keeper_reward > 0 {
-            let native_token = env.native_token();
-            // Effects before interactions: the cancellation is finalized above.
-            // If the payment fails (insufficient balance), the cancellation remains
-            // but the keeper gets no reward. Operators must ensure reserves are
-            // sufficient or accept occasional payment failures.
-            native_token.transfer(&env.current_contract_address(), &caller, &keeper_reward);
+            // Retrieve the native token address from storage. Issue #173.
+            if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
+                // Transfer the keeper reward using the idiomatic TokenClient pattern.
+                // The contract is the sender; the caller is the recipient.
+                token::TokenClient::new(&env, &native_token).transfer(
+                    &env.current_contract_address(),
+                    &caller,
+                    &keeper_reward,
+                );
+                // Emit an observable event for the reward payout. Issue #173.
+                env.events().publish(
+                    (Symbol::new(&env, "keeper_reward_paid"), intent_hash.clone()),
+                    (caller.clone(), keeper_reward),
+                );
+            }
+            // If native_token is not configured, silently skip the reward.
+            // This allows deployment to proceed before the native token address
+            // is set, though keeper rewards will not be paid. Operators must call
+            // set_native_token and then re-enable rewards via set_keeper_reward.
         }
 
         env.events().publish(

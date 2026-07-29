@@ -78,6 +78,30 @@ export function isStellarAddress(value: string): boolean {
 }
 
 /**
+ * Decode a Stellar strkey to its 33-byte canonical form: version byte + 32-byte key.
+ * Returns [version, keyBytes] on success, null if strkey is invalid.
+ *
+ * @param value - A valid G... or C... strkey (56 chars).
+ */
+export function decodeStrkey(
+  value: string,
+): [version: number, key: Uint8Array] | null {
+  const decoded = base32Decode(value);
+  if (!decoded || decoded.length !== 35) return null; // 1 version + 32 key + 2 CRC
+  
+  const version = decoded[0]!;
+  if (version !== 0x30 && version !== 0x10) return null; // G or C only
+  
+  // Validate CRC-16 checksum (last 2 bytes)
+  const payload = decoded.slice(0, 33);
+  const checksum = decoded[33]! | (decoded[34]! << 8);
+  if (crc16(payload) !== checksum) return null;
+  
+  const key = decoded.slice(1, 33);
+  return [version, key];
+}
+
+/**
  * Returns true if `value` is a valid Stellar asset identifier:
  * - `"native"` for XLM
  * - `"<CODE>:<ISSUER>"` where CODE is 1–12 alphanumeric chars and ISSUER

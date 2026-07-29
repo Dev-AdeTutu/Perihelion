@@ -32,6 +32,8 @@ on:
       - ".nvmrc"
       - "tsconfig.base.json"
       - ".github/workflows/ci.yml"
+      - "docs/**"
+      - "*.md"
   pull_request:
     branches: [main]
     paths:
@@ -44,6 +46,8 @@ on:
       - ".nvmrc"
       - "tsconfig.base.json"
       - ".github/workflows/ci.yml"
+      - "docs/**"
+      - "*.md"
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -51,14 +55,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Required gate for branch protection — always passes so the pipeline reports
-  # a green check even when path filters skip other jobs.
-  check:
-    name: Required check
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "CI triggered — all relevant jobs will run."
-
   typescript:
     name: TypeScript (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -89,3 +85,29 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  # Required gate for branch protection.
+  #
+  # This job is the ONLY check registered in GitHub's required-status-checks.
+  # It deliberately gates on `typescript` so a build failure is always visible
+  # to branch protection, while still passing green when the path filter skips
+  # the typescript job entirely (e.g. a docs-only PR that doesn't touch sdk/**).
+  #
+  # Behaviour matrix:
+  #   typescript ran and passed  → check passes  ✅
+  #   typescript ran and failed  → check fails   ❌  (build broken, merge blocked)
+  #   typescript was skipped     → check passes  ✅  (path filter, docs-only PR)
+  check:
+    name: Required check
+    runs-on: ubuntu-latest
+    needs: [typescript]
+    if: always()
+    steps:
+      - name: Assert typescript passed or was skipped
+        run: |
+          result="${{ needs.typescript.result }}"
+          if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+            echo "::error::typescript job $result — merge is blocked."
+            exit 1
+          fi
+          echo "typescript result: $result — gate passes."

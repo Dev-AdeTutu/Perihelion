@@ -172,6 +172,13 @@ export async function evaluate(
   inFlight?: InFlightTracker,
 ): Promise<FillDecision> {
   // ── terminal checks ──────────────────────────────────────────────────────
+  if (intent.sourceChainId !== config.sourceChainId) {
+    return {
+      fill: false,
+      reason: `wrong chain ${intent.sourceChainId} (solver is on ${config.sourceChainId})`,
+      terminal: true,
+    };
+  }
   if (isExpired(intent)) {
     return { fill: false, reason: "intent expired", terminal: true };
   }
@@ -206,6 +213,14 @@ export async function evaluate(
     return { fill: false, reason: "fee-inclusive profit is non-positive", terminal: false };
   }
   const profitBps = Number((profit * 10_000n) / proceeds);
+  if (profitBps < config.minMarginBps) {
+    return {
+      fill: false,
+      reason: `margin ${profitBps}bps below minimum ${config.minMarginBps}bps`,
+      terminal: false,
+      profitBps,
+    };
+  }
 
   // ── inventory check ───────────────────────────────────────────────────────
   // Use the caller-supplied provider if it exposes a balance, else unlimited.
