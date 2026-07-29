@@ -977,68 +977,52 @@ impl Perihelion {
             || p.has(&DataKey::Cancelled(intent_hash.clone()))
     }
 
-    /// Accept a nonce exactly once, regardless of delivery order. Uses a bitmap to
-    /// track consumed nonces in a 64-nonce window (base, base+63]. If a nonce falls
-    /// outside the window, the base advances and the old bitmap is discarded, so
-    /// very old messages are still rejected (cannot replay messages more than ~64
-    /// messages old without an explicit reset). This implements true "unordered
-    /// delivery" semantics per LayerZero V2 lazy-nonce model.
+    /// Accept a nonce exactly once, regardless of delivery order. Uses an
+    /// unbounded per-`(eid, word_index)` bitmap that mirrors the EVM
+    /// `_inboundNonceBitmap[srcEid][wordIndex]` layout (issue #285).
     ///
-    /// This is the **LayerZero transport nonce** guard. It prevents the same
-    /// LayerZero message from being replayed at the transport layer. It is distinct
-    /// from the `Intent.nonce` 256-bit random value in the EIP-712 payload, which
-    /// only prevents two identical intents from mapping to the same `intent_hash`
-    /// (collision prevention). The application-layer idempotency guarantee against
-    /// double-settle and double-cancel is provided by the `Settled` and `Cancelled`
-    /// persistent markers checked in `fill_intent` and `cancel_expired_intent`.
+    /// A nonce `n` is tracked at:
+    ///   word_index = n / 64
+    ///   bit_index  = n % 64
     ///
-    /// See `docs/TECHNICAL-ARCHITECTURE.md §11` for the full anti-replay story.
+    /// Each storage word covers 64 consecutive nonces. Words are created lazily
+    /// on first use and **never discarded**, so messages from any in-flight
+    /// delivery window (no matter how large the gap between nonces) are always
+    /// accepted exactly once. This makes the two implementations semantically
+    /// equivalent: no "window advance" can silently drop in-flight messages.
+    ///
+    /// Storage cost is one persistent entry per 64 nonces, proportional to
+    /// actual traffic.
+    ///
+    /// This is the **LayerZero transport nonce** guard — distinct from the
+    /// `Intent.nonce` 256-bit random field in the EIP-712 payload (collision
+    /// prevention only). The application-layer idempotency guard is the
+    /// `Settled` / `Cancelled` persistent markers. See §11 in
+    /// `docs/TECHNICAL-ARCHITECTURE.md`.
     fn accept_nonce(env: &Env, eid: u32, nonce: u64) -> Result<(), PerihelionError> {
         if nonce == 0 {
             return Err(PerihelionError::StaleNonce);
         }
 
+        let word_index: u64 = nonce / 64;
+        let bit_index: u32 = (nonce % 64) as u32;
+        let bit: u64 = 1u64 << bit_index;
+
         let ps = env.storage().persistent();
-        let base_key = DataKey::InboundNonceBase(eid);
-        let bitmap_key = DataKey::InboundNonceBitmap(eid);
+        let word_key = DataKey::InboundNonceWord(eid, word_index);
+        let mut word: u64 = ps.get(&word_key).unwrap_or(0);
 
-        let base: u64 = ps.get(&base_key).unwrap_or(0);
-        let mut bitmap: u64 = ps.get(&bitmap_key).unwrap_or(0);
-
-        // If nonce <= base, it was already processed (or too old).
-        if nonce <= base {
+        if word & bit != 0 {
+            // Nonce already consumed — reject as stale/replay.
             return Err(PerihelionError::StaleNonce);
         }
 
-        // If nonce > base + 64, advance the window.
-        if nonce > base + 64 {
-            let new_base = nonce - 1;
-            ps.set(&base_key, &new_base);
-            ps.set(&bitmap_key, &1u64); // Only the new nonce is set in the bitmap.
-            // Replay-safety invariant: archival of either entry resets the
-            // high-water mark to zero, re-opening previously consumed nonces.
-            ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
-            ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
-            return Ok(());
-        }
-
-        // Nonce is in the current window: [base + 1, base + 64].
-        let offset = (nonce - base - 1) as u32;
-        let bit = 1u64 << offset;
-
-        if bitmap & bit != 0 {
-            // Already consumed.
-            return Err(PerihelionError::StaleNonce);
-        }
-
-        bitmap |= bit;
-        // Write base explicitly so extend_ttl can always find the key in storage.
-        ps.set(&base_key, &base);
-        ps.set(&bitmap_key, &bitmap);
-        // Replay-safety invariant: archival of either entry resets the
-        // high-water mark to zero, re-opening previously consumed nonces.
-        ps.extend_ttl(&base_key, MAX_TTL / 2, MAX_TTL);
-        ps.extend_ttl(&bitmap_key, MAX_TTL / 2, MAX_TTL);
+        word |= bit;
+        ps.set(&word_key, &word);
+        // REPLAY-SAFETY: archival of this entry re-opens the 64 nonces it
+        // covers. Always extend TTL to MAX_TTL so the word outlives any
+        // realistic in-flight delivery window.
+        ps.extend_ttl(&word_key, MAX_TTL / 2, MAX_TTL);
         Ok(())
     }
 
