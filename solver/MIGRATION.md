@@ -236,3 +236,33 @@ If you encounter issues not covered in this guide:
 **Required**: Migrate before the next breaking release (TBD)
 
 The verification caching is backward compatible in behavior (same fill decisions), but the new security checks (hash validation) may surface mempool issues that were previously undetected.
+
+# Migration Guide: PriceOracle Rate Precision
+
+## Breaking Change
+
+`PriceOracle` (`solver/src/quote.ts`) now returns `bigint` instead of `number`. A
+rate is expressed as a fixed-point value scaled by `RATE_SCALE` (`10n ** 18n`);
+a 1:1 rate is `RATE_SCALE` itself, not `1.0`.
+
+### Why
+
+`computeProceeds` previously routed amounts through `parseFloat`/`Number`,
+which silently loses precision above `Number.MAX_SAFE_INTEGER` and can throw
+on very large amounts. Pricing math is now done entirely in `bigint`.
+
+### Migration Steps
+
+If you supply a custom `priceOracle` to `evaluate`/`computeProceeds`, change
+its return type from a `number` rate to a `bigint` scaled by `RATE_SCALE`:
+
+```ts
+// Before
+const priceOracle: PriceOracle = async () => 1.0;
+
+// After
+import { RATE_SCALE } from "@perihelion/solver/quote.js";
+const priceOracle: PriceOracle = async () => RATE_SCALE;
+```
+
+For a non-1:1 rate (e.g. 1.05), return `RATE_SCALE * 105n / 100n`.
