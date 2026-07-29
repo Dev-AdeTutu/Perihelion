@@ -26,6 +26,11 @@ use 7 decimals in Soroban token amounts. At settlement, a Stellar destination
 asset may be represented by its Stellar Asset Contract address, but its decimals
 remain the decimals of the underlying Stellar asset.
 
+The reference solver's `defaultDecimalsLookup` (`solver/src/quote.ts`) reflects
+this: it never guesses decimals for an EVM token address — it throws, and the
+intent is skipped rather than priced. Operators must supply a `DecimalsLookup`
+covering every EVM asset they support (see [Running a Solver](./running-a-solver.md)).
+
 ## Corridor Conversion
 
 Let:

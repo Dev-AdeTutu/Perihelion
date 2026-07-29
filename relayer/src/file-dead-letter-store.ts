@@ -5,8 +5,14 @@ import type { DeadLetterStore, DeadLetterEntry } from "./dead-letter.js";
 import type { MessageKey, PendingMessage } from "./types.js";
 import { messageKeyString } from "./types.js";
 
-/** Persists dead-lettered messages to JSON for durability across restarts. */
-export class FileDeadLetterStore implements DeadLetterStore {
+/**
+ * Persists dead-lettered messages to JSON for durability across restarts.
+ *
+ * This is the serialization layer only — it is deliberately *not* a
+ * {@link DeadLetterStore}. `HybridDeadLetterStore` below owns the in-memory
+ * queue semantics (add/list/drain/discard/has) and delegates persistence here.
+ */
+export class FileDeadLetterStore {
   constructor(private readonly path: string) {}
 
   async load(): Promise<Map<string, DeadLetterEntry>> {

@@ -4,8 +4,8 @@ import { buildIntent } from "@perihelion/sdk";
 import { zeroAddress } from "viem";
 import { loadConfig } from "../src/config.js";
 import { computeProceeds, evaluate, isSolverEligible, RATE_SCALE } from "../src/quote.js";
+import type { EvaluateDeps, PricingDeps } from "../src/quote.js";
 import { InFlightTracker } from "../src/inventory.js";
-import type { InventoryProvider } from "../src/inventory.js";
 
 const config = loadConfig({
   PERIHELION_SOLVER_ADDRESS: "0x3333333333333333333333333333333333333333",
@@ -121,6 +121,34 @@ test("fills exactly at the configured margin boundary", async () => {
   assert.equal(decision.profitBps, 10);
 });
 
+// ─── decimals must never be guessed (#310) ───────────────────────────────────
+
+test("evaluate: unknown EVM asset decimals produce a non-terminal skip, not a guess", async () => {
+  // No decimalsLookup override -> defaultDecimalsLookup must refuse to guess
+  // for an 0x-prefixed asset instead of assuming 6dp.
+  const decision = await evaluate(intent(), config, {
+    priceOracle: async () => RATE_SCALE,
+    feeEstimator: async () => 0n,
+  });
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, false);
+  assert.match(decision.reason, /decimals not configured/);
+});
+
+test("evaluate: implausible profit is rejected by the sanity bound", async () => {
+  // Simulates a WETH (18dp) intent mispriced as 6dp (the #310 bug): proceeds
+  // come back ~10^12x too large relative to minDestAmount, yielding an
+  // implausible profitBps that the sanity bound must catch as a last resort.
+  const decision = await evaluate(
+    intent({ sourceAmount: "1000000000000000000", minDestAmount: "9000000" }),
+    config,
+    { decimalsLookup: (assetId) => (assetId.startsWith("0x") ? 6 : 7), priceOracle: async () => RATE_SCALE, feeEstimator: async () => 0n },
+  );
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, false);
+  assert.match(decision.reason, /implausible profit/);
+});
+
 // ─── decimal corridor tests (#87) ────────────────────────────────────────────
 
 test("18dp → 7dp corridor: ETH-like source to Stellar asset", async () => {
@@ -216,8 +244,8 @@ test("evaluate: skips intent reserved for another solver", async () => {
 
 // ---- #88 inventory tests ----
 
-function fixedInventory(balance: bigint): InventoryProvider {
-  return { availableBalance: async () => balance };
+function fixedInventory(balance: bigint): EvaluateDeps {
+  return { ...usdcDeps, availableBalance: async () => balance };
 }
 
 test("evaluate: fills when inventory is sufficient", async () => {

@@ -14,6 +14,7 @@ import {
 import { Solver, FatalError, type Executor, type Logger } from "../src/solver.js";
 import type { SolverConfig } from "../src/config.js";
 import type { InventoryProvider } from "../src/inventory.js";
+import { RATE_SCALE, type PricingDeps } from "../src/quote.js";
 
 // Test fixtures
 const CHAIN_ID = 8453;
@@ -31,6 +32,19 @@ const baseConfig: SolverConfig = {
   pollIntervalMs: 1000,
   supportedDestAssets: ["native"],
   verificationCacheSize: 100,
+};
+
+/**
+ * Pricing deps for the fixtures below. These tests exercise the poll/verify/
+ * fill control flow, not the pricing math, so both legs use 6dp and a 1:1 rate
+ * — that keeps `sourceAmount`/`minDestAmount` directly comparable. Supplying
+ * them is mandatory: `defaultDecimalsLookup` refuses to guess decimals for EVM
+ * token addresses (#310), so without this every intent skips as unpriceable.
+ */
+const testPricingDeps: PricingDeps = {
+  decimalsLookup: () => 6,
+  priceOracle: async () => RATE_SCALE,
+  feeEstimator: async () => 0n,
 };
 
 function buildTestIntent() {
@@ -84,7 +98,7 @@ test("verifies signature only once for the same intent hash", async () => {
     json: async () => [record],
   })) as any;
 
-  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
 
   // First tick - should verify
   await solver.tick();
@@ -173,7 +187,7 @@ test("caches invalid signatures to avoid re-verification within the negative TTL
     json: async () => [record],
   })) as any;
 
-  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
 
   // First tick - should verify and reject
   await solver.tick();
@@ -234,7 +248,7 @@ test("corrected resubmission with a valid signature is verified and filled", asy
     json: async () => pendingRecords,
   })) as any;
 
-  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
 
   // First submission: bad signature, rejected, not filled.
   await solver.tick();
@@ -284,7 +298,7 @@ test("negative verification cache entries expire, allowing re-verification", asy
     let fakeNow = originalNow();
     Date.now = () => fakeNow;
 
-    const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+    const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
 
     await solver.tick();
     assert.equal(verifyCallCount, 1, "should verify on first encounter");
@@ -346,7 +360,7 @@ test("two different signatures over the same hash do not share a cache entry", a
     json: async () => pendingRecords,
   })) as any;
 
-  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
 
   await solver.tick();
   assert.deepEqual(verifiedSignatures, [sigA], "sigA verified once");
@@ -418,7 +432,7 @@ test("verification cache evicts oldest entries when full", async () => {
     json: async () => pendingRecords,
   })) as any;
 
-  const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger, undefined, zeroInventory, mockVerify);
+  const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger, undefined, zeroInventory, mockVerify, testPricingDeps);
 
   // Process intent1 and intent2 (fills cache to capacity)
   pendingRecords = [record1];
@@ -564,7 +578,7 @@ test("complete flow: hash validation and cached verification", async () => {
     json: async () => [record],
   })) as any;
 
-  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify, testPricingDeps);
 
   // First tick: verify and fill
   await solver.tick();

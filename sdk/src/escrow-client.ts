@@ -80,6 +80,7 @@ export class PerihelionEscrowClient {
 
     const hash = await this.walletClient.writeContract({
       account,
+      chain: this.walletClient.chain,
       address: this.escrowAddress,
       abi: ESCROW_ABI,
       functionName: "lock",
@@ -102,6 +103,7 @@ export class PerihelionEscrowClient {
 
     const hash = await this.walletClient.writeContract({
       account,
+      chain: this.walletClient.chain,
       address: this.escrowAddress,
       abi: ESCROW_ABI,
       functionName: "cancelExpired",

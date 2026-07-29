@@ -9,7 +9,7 @@ import {
   Keypair,
   Contract,
   nativeToScVal,
-  xdrInt,
+  scValToNative,
   type Account,
 } from "@stellar/stellar-sdk";
 import type { DestinationDelivery } from "./relayer.js";
@@ -105,19 +105,8 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   async isDelivered(key: MessageKey): Promise<boolean> {
     try {
       const { intentHash, messageType } = key;
-      const contract = new Contract(this.settlementContractId);
-
-      // Query the contract's status view to determine delivery state
-      const result = await this.rpc.invokeContractView({
-        contractId: this.settlementContractId,
-        method: "status",
-        args: [nativeToScVal(intentHash, { type: "bytes" })],
-      });
-
-      if (!result.result) return false;
-
-      const resultValue = result.result.result.value();
-      if (!resultValue) return false;
+      const resultValue = await this.readStatus(intentHash);
+      if (resultValue === null) return false;
 
       // Map message type to delivery criteria
       // FillInstruction is delivered if intent exists at all (status != NotFound)
@@ -140,18 +129,43 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     }
   }
 
+  /**
+   * Read the settlement contract's `status(intent_hash)` view.
+   *
+   * Soroban RPC has no direct "call a view" endpoint, so this simulates a
+   * single-invocation transaction and decodes the return value. Returns the
+   * status variant name, or `null` if the contract produced no value.
+   */
+  private async readStatus(intentHash: string): Promise<string | null> {
+    const contract = new Contract(this.settlementContractId);
+    const account = await this.getSignerAccount();
+    const tx = new TransactionBuilder(account, {
+      fee: "100",
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(contract.call("status", nativeToScVal(intentHash, { type: "bytes" })))
+      .setTimeout(30)
+      .build();
+
+    const simulated = await this.rpc.simulateTransaction(tx);
+    if (!SorobanRpc.Api.isSimulationSuccess(simulated) || !simulated.result) return null;
+
+    // Soroban enums decode either to a bare symbol or to a [tag, ...payload]
+    // vec; both carry the variant name in the leading position.
+    const native: unknown = scValToNative(simulated.result.retval);
+    if (typeof native === "string") return native;
+    if (Array.isArray(native) && typeof native[0] === "string") return native[0];
+    return null;
+  }
+
   private async isEntryArchived(): Promise<boolean> {
     try {
       const entries = await this.rpc.getLedgerEntries(
-        new Contract(this.settlementContractId).getContractData(),
+        new Contract(this.settlementContractId).getFootprint(),
       );
 
-      if (!entries.entries || entries.entries.length === 0) {
-        return false;
-      }
-
-      const entry = entries.entries[0];
-      if (!entry.liveUntilLedgerSeq) {
+      const entry = entries.entries?.[0];
+      if (!entry?.liveUntilLedgerSeq) {
         return false;
       }
 
@@ -173,24 +187,18 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   ): Promise<TransactionBuilder> {
     try {
       const entries = await this.rpc.getLedgerEntries(
-        new Contract(this.settlementContractId).getContractData(),
+        new Contract(this.settlementContractId).getFootprint(),
       );
 
       if (!entries.entries || entries.entries.length === 0) {
         return builder;
       }
 
-      // Get the soroban data from the current builder
-      const sorobanData = builder.build().ext.v() === 1
-        ? builder.build().ext.sorobanData()
-        : null;
-
-      if (sorobanData) {
-        // In a full implementation, would create RestoreFootprint operation
-        // with the archived key. For now, return unchanged.
-        return builder;
-      }
-
+      // TODO(#303): build the RestoreFootprint operation from the archived
+      // key and attach it with the corresponding SorobanTransactionData. Until
+      // that lands, the delivery still simulates and submits normally — an
+      // archived entry will surface as a simulation error rather than a silent
+      // failure, so the message is retried instead of lost.
       return builder;
     } catch {
       return builder;
