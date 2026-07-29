@@ -203,6 +203,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
+    /// @notice token => aggregate of all un-finalised Lock.amount values for that token.
+    ///         Incremented in lock(), decremented in _onFillConfirmed, _onCancelIntent,
+    ///         and cancelExpired. Allows skim() to compute the genuine on-chain surplus
+    ///         and prevents the owner from draining active user deposits.
+    mapping(address => uint256) public totalLocked;
     /// @notice Rolling-window bucket tracking: window start timestamp => cumulative locked amount.
     ///         Each lock bumps the current window bucket. Windows slide; old buckets are orphaned.
     mapping(uint256 => uint256) private _rollingWindowBuckets;
@@ -320,6 +325,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error RollingWindowCapExceeded();
     error RollingWindowCapTriggered();
     error RollingWindowNotYetResettable();
+    /// @dev skim() would draw into funds locked by active intents.
+    error ExceedsSurplus();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -505,11 +512,19 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         contract is NOT compatible with rebasing/deflationary tokens; this
     ///         function is provided only to recover surplus that cannot be attributed
     ///         to any active lock. Owner-only.
+    /// @dev    Bounded by the genuine on-chain surplus: balanceOf(this) - totalLocked[token].
+    ///         This prevents the owner (even via a timelock) from draining funds that
+    ///         belong to active intents. The totalLocked invariant is maintained by
+    ///         lock(), _onFillConfirmed(), _onCancelIntent(), and cancelExpired().
     /// @param token ERC-20 token to recover.
     /// @param to Recipient address.
-    /// @param amount Amount to transfer.
+    /// @param amount Amount to transfer; must not exceed the surplus.
     function skim(address token, address to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        uint256 locked = totalLocked[token];
+        uint256 surplus = bal > locked ? bal - locked : 0;
+        if (amount > surplus) revert ExceedsSurplus();
         _safeTransfer(token, to, amount);
         emit Skimmed(token, to, amount);
     }
@@ -579,6 +594,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             released: false,
             refunded: false
         });
+
+        // Increment the aggregate liability counter so skim() can compute surplus.
+        totalLocked[intent.sourceAsset] += received;
 
         emit Locked(intentHash, msg.sender, intent.user, intent.sourceAsset, received);
 
@@ -688,6 +706,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (l.released || l.refunded) revert AlreadyFinalized();
 
         l.released = true; // effect before interaction (race guard)
+        totalLocked[l.asset] -= l.amount;
         _safeTransfer(l.asset, solverEvm, l.amount);
         emit Released(intentHash, solverEvm, l.amount, fillAmount, fillLedger);
     }
@@ -699,6 +718,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (l.released || l.refunded) revert AlreadyFinalized();
 
         l.refunded = true;
+        totalLocked[l.asset] -= l.amount;
         _safeTransfer(l.asset, l.user, l.amount);
         emit Refunded(intentHash, l.user, l.amount, reason);
     }
@@ -747,6 +767,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (block.timestamp < l.deadline + confirmationGrace) revert DeadlineNotPassed();
 
         l.refunded = true;
+        totalLocked[l.asset] -= l.amount;
         _safeTransfer(l.asset, l.user, l.amount);
         emit Refunded(intentHash, l.user, l.amount, CANCEL_REASON_EXPIRED);
     }
