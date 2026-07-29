@@ -27,6 +27,16 @@ info:
     | `refunded` | Solver-initiated refund after a failed or cancelled fill     |
     | `expired`  | Deadline passed before any solver claimed the intent         |
 
+    ## Status ownership
+
+    The mempool does not observe chain state itself. Status transitions are
+    reported by trusted relayer/solver services via
+    `PATCH /intents/{hash}/status`, authenticated with a bearer token shared
+    out-of-band (the mempool operator's `statusToken`). If no token is
+    configured, the endpoint is unauthenticated — suitable only for local
+    development. Mempool status is a convenience hint for polling clients; it
+    is not a substitute for verifying settlement on-chain.
+
     ## Pagination
 
     The current implementation returns **all** matching records in a single
@@ -271,7 +281,68 @@ paths:
               example:
                 error: "Intent not found"
 
+  /intents/{hash}/status:
+
+    patch:
+      operationId: updateIntentStatus
+      tags: [Intents]
+      summary: Report a status transition for an intent
+      description: |
+        Restricted to trusted relayer/solver services that hold the
+        mempool's shared bearer token (see "Status ownership" above).
+        Refuses to change the status of an intent already in a terminal
+        state (`settled`, `refunded`, `expired`).
+      security:
+        - statusToken: []
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/Hex'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/IntentStatus'
+      responses:
+        '200':
+          description: Updated intent record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntentRecord'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No intent with the given hash exists in the mempool.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The intent is already in a terminal status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
+  securitySchemes:
+    statusToken:
+      type: http
+      scheme: bearer
+      description: Shared token configured on the mempool via `statusToken`.
+
   schemas:
 
     # ─── Primitive types ────────────────────────────────────────────────────

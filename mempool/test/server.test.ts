@@ -10,8 +10,10 @@ import { test, before, after } from "node:test";
 import {
   buildIntent,
   perihelionDomain,
+  PerihelionClient,
   INTENT_TYPES,
   toMessage,
+  hashIntent,
   type Address,
 } from "@perihelion/sdk";
 import { privateKeyToAccount } from "viem/accounts";
@@ -21,18 +23,29 @@ const CHAIN_ID = 8453;
 const ESCROW: Address = "0x00000000000000000000000000000000000000aa";
 const PORT = 3987;
 const BASE = `http://localhost:${PORT}`;
+const STATUS_PORT = 3988;
+const STATUS_TOKEN = "test-shared-token";
 
 const account = privateKeyToAccount(("0x" + "11".repeat(32)) as `0x${string}`);
 
 let server: MempoolServer;
+let statusServer: MempoolServer;
 
 before(async () => {
   server = new MempoolServer({ port: PORT, chainId: CHAIN_ID, verifyingContract: ESCROW });
   await server.start();
+  statusServer = new MempoolServer({
+    port: STATUS_PORT,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    statusToken: STATUS_TOKEN,
+  });
+  await statusServer.start();
 });
 
 after(async () => {
   await server.stop();
+  await statusServer.stop();
 });
 
 function sampleIntent() {
@@ -193,4 +206,34 @@ test("terminal statuses are final: updateStatus cannot move a settled intent bac
 
   const record = await (await fetch(`${BASE}/intents/${hash}`)).json();
   assert.equal(record.status, "settled");
+});
+
+// ─── Issue 321: authenticated PATCH /intents/:hash/status ──────────────────
+
+test("PATCH /intents/:hash/status rejects requests without the configured token", async () => {
+  const res = await fetch(`http://localhost:${STATUS_PORT}/intents/0xdead/status`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "settled" }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test("submit -> report settled over HTTP -> waitForSettlement resolves promptly", async () => {
+  const client = new PerihelionClient({
+    mempoolUrl: `http://localhost:${STATUS_PORT}`,
+    chainId: CHAIN_ID,
+    verifyingContract: ESCROW,
+    fetch,
+  });
+
+  const intent = sampleIntent();
+  const domain = perihelionDomain(CHAIN_ID, ESCROW);
+  const signature = await sign(intent, domain);
+  const hash = await client.submitIntent({ intent, signature, hash: hashIntent(intent, domain) });
+
+  await client.reportStatus(hash, "settled", STATUS_TOKEN);
+
+  const result = await client.waitForSettlement(hash, { intervalMs: 20, timeoutMs: 2_000 });
+  assert.equal(result.status, "settled");
 });

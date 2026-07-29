@@ -12,6 +12,7 @@ if (!process.env.PERIHELION_ESCROW_ADDRESS) {
 
 const chainId = Number(process.env.PERIHELION_SOURCE_CHAIN_ID);
 const verifyingContract = process.env.PERIHELION_ESCROW_ADDRESS as Address;
-const server = new MempoolServer({ port, chainId, verifyingContract });
+const statusToken = process.env.PERIHELION_MEMPOOL_STATUS_TOKEN;
+const server = new MempoolServer({ port, chainId, verifyingContract, statusToken });
 
 await server.start();

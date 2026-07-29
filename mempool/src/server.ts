@@ -29,6 +29,18 @@ const INTENT_STATUSES: ReadonlySet<string> = new Set([
   "expired",
 ]);
 
+/**
+ * Statuses the mempool itself may be moved into via PATCH /intents/:hash/status.
+ * Narrower than {@link INTENT_STATUSES}: `claimed`/`settling` are derived from
+ * chain state, not reported by the relayer.
+ */
+const VALID_STATUSES: ReadonlySet<IntentStatus> = new Set([
+  "pending",
+  "settled",
+  "refunded",
+  "expired",
+]);
+
 export interface MempoolServerOptions {
   port?: number;
   host?: string;
@@ -36,6 +48,13 @@ export interface MempoolServerOptions {
   chainId: number;
   /** PerihelionEscrow contract address. Binds the EIP-712 domain. Required. */
   verifyingContract: Address;
+  /**
+   * Shared bearer token required on `PATCH /intents/:hash/status`. Only
+   * holders of this token (the relayer/solver) may report status changes.
+   * If omitted, the endpoint is unauthenticated — fine for local dev/tests,
+   * unsafe to expose publicly.
+   */
+  statusToken?: string;
 }
 
 const DEFAULT_LIST_LIMIT = 100;
@@ -52,6 +71,7 @@ export class MempoolServer {
   private server?: Server;
   private rateLimitHits = new Map<string, number[]>();
   private sweepTimer?: ReturnType<typeof setInterval>;
+  private statusToken?: string;
 
   constructor(opts: MempoolServerOptions) {
     if (opts.chainId === undefined || opts.chainId === null || Number.isNaN(opts.chainId)) {
@@ -65,6 +85,7 @@ export class MempoolServer {
     this.port = opts.port ?? 3000;
     this.host = opts.host ?? "localhost";
     this.domain = perihelionDomain(opts.chainId, opts.verifyingContract);
+    this.statusToken = opts.statusToken;
     this.setupRoutes();
   }
 
@@ -75,6 +96,38 @@ export class MempoolServer {
     this.app.post("/intents", this.rateLimit.bind(this), this.handleSubmitIntent.bind(this));
     this.app.get("/intents/:hash", this.handleGetIntent.bind(this));
     this.app.get("/intents", this.handleListIntents.bind(this));
+    this.app.patch("/intents/:hash/status", this.handleUpdateStatus.bind(this));
+  }
+
+  private handleUpdateStatus(req: Request, res: Response): void {
+    if (this.statusToken) {
+      const auth = req.header("authorization");
+      if (auth !== `Bearer ${this.statusToken}`) {
+        res.status(401).json({ error: "Missing or invalid status token" });
+        return;
+      }
+    }
+
+    const { hash } = req.params as { hash: Hex };
+    const { status } = req.body as { status?: IntentStatus };
+
+    if (!status || !VALID_STATUSES.has(status)) {
+      res.status(400).json({ error: `status must be one of ${[...VALID_STATUSES].join(", ")}` });
+      return;
+    }
+
+    if (!this.store.get(hash as Hex)) {
+      res.status(404).json({ error: "Intent not found" });
+      return;
+    }
+
+    const updated = this.store.updateStatus(hash as Hex, status);
+    if (!updated) {
+      res.status(409).json({ error: "Cannot change status of a terminal intent" });
+      return;
+    }
+
+    res.json(this.store.get(hash as Hex));
   }
 
   private handleInfo(_req: Request, res: Response): void {
@@ -213,6 +266,11 @@ export class MempoolServer {
       console.warn(
         "Mempool store is in-memory only: pending intents are lost on restart.",
       );
+      if (!this.statusToken) {
+        console.warn(
+          "PATCH /intents/:hash/status is unauthenticated (no statusToken configured) — do not expose this port publicly.",
+        );
+      }
       this.sweepTimer = setInterval(() => this.store.evictExpired(), SWEEP_INTERVAL_MS);
       this.sweepTimer.unref?.();
       this.server = this.app.listen(this.port, this.host, () => {
