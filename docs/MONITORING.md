@@ -169,6 +169,54 @@ These indicate anomalies that require investigation but may have benign explanat
   - If deadline is current, may be normal (end of epoch)
   - If rate remains elevated, escalate (possible attack or griefing)
 
+#### Alert H5: Timelock Revoke/Re-confirm Griefing (issue #283)
+- **Condition:** The same operation id emits `ConfirmationRevoked` followed by
+  `Confirmed` (or `Ready`) more than **2 times within any 24-hour window**,
+  or a `Ready` event is emitted for an id that already emitted `Ready` previously.
+- **Why it matters:** Prior to the monotonic-clock fix (issue #283),
+  `revokeConfirmation` reset `readyAt` so a revoke/re-confirm cycle could
+  push the execution window forward indefinitely. The fix made `readyAt`
+  monotonic, so `Ready` is emitted at most once per operation. If `Ready`
+  fires more than once for the same id, or if the revoke/re-confirm pattern
+  repeats rapidly, it signals either:
+  - A disgruntled owner attempting governance delay (should not affect
+    `readyAt` after the fix, but still wastes honest owners' gas).
+  - A contract running pre-fix code (deployment incident).
+- **Trigger:** `Ready(id, readyAt)` emitted for an id that already has a
+  recorded `readyAt`; or `ConfirmationRevoked(id)` followed by `Confirmed(id)`
+  more than 2 times within 24 hours for the same id.
+- **Action:**
+  - Verify the deployed contract is the patched version (no `readyAt` reset
+    in `revokeConfirmation`). If it is pre-fix, pause and redeploy immediately.
+  - If post-fix: log the cycling owner address; the operation itself is safe
+    (readyAt is unchanged), but the pattern may indicate a disgruntled signer.
+  - Alert ops to coordinate with the cycling owner out-of-band.
+  - No auto-pause required for post-fix deployments; the protocol is not at risk.
+- **Monitoring query:**
+  ```sql
+  -- Detect repeated Ready emissions for the same operation (post-fix: should be 0)
+  SELECT id, COUNT(*) as ready_count
+  FROM timelock_events
+  WHERE event_name = 'Ready'
+    AND block_time > NOW() - INTERVAL 7 DAYS
+  GROUP BY id
+  HAVING COUNT(*) > 1
+  ORDER BY ready_count DESC;
+
+  -- Detect rapid revoke/re-confirm cycling
+  SELECT id, COUNT(*) as cycle_count, MIN(block_time) as first_seen
+  FROM (
+    SELECT id, block_time,
+           LAG(event_name) OVER (PARTITION BY id ORDER BY block_time) as prev_event
+    FROM timelock_events
+    WHERE event_name IN ('ConfirmationRevoked', 'Confirmed')
+  ) t
+  WHERE event_name = 'Confirmed' AND prev_event = 'ConfirmationRevoked'
+    AND block_time > NOW() - INTERVAL 24 HOURS
+  GROUP BY id
+  HAVING COUNT(*) > 2;
+  ```
+
 ### MEDIUM Alerts (Informational, No Pause)
 
 These indicate degraded performance or minor anomalies.
