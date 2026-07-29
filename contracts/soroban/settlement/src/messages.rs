@@ -135,16 +135,16 @@ pub fn decode_message(
     }
 }
 
-/// Decode a `FillInstruction` payload (158 bytes):
-/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(32) | dest_asset(32) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`.
+/// Decode a `FillInstruction` payload (219 bytes):
+/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32)`.
 fn decode_fill_instruction(
     env: &Env,
     message: &Bytes,
 ) -> Result<FillInstruction, crate::PerihelionError> {
     use crate::PerihelionError;
 
-    // Validate length: 2 (header) + 156 (payload) = 158
-    if message.len() != 158 {
+    // Validate length: 2 (header) + 217 (payload) = 219
+    if message.len() != 219 {
         return Err(PerihelionError::MalformedPayload);
     }
 
@@ -166,47 +166,55 @@ fn decode_fill_instruction(
     }
     let src_eid = u32::from_be_bytes(src_eid_bytes);
 
-    // Extract recipient (offset 38, 32 bytes strkey body)
-    let mut recipient_bytes = [0u8; 32];
-    for i in 0..32 {
-        recipient_bytes[i] = message
+    // Extract recipient (offset 38, 56 bytes strkey string body, right-zero-padded).
+    // The full 56 bytes are read from the wire; the contract-id conversion uses
+    // the first 32 bytes. Issue #271 replaces this with Address::from_string.
+    let mut recipient_raw = [0u8; 56];
+    for i in 0..56 {
+        recipient_raw[i] = message
             .get(38 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
-    let recipient = Address::from_contract_id(env, recipient_bytes);
+    let mut recipient_id = [0u8; 32];
+    recipient_id.copy_from_slice(&recipient_raw[..32]);
+    let recipient = Address::from_contract_id(env, recipient_id);
 
-    // Extract dest_asset (offset 70, 32 bytes)
-    let mut dest_asset_bytes = [0u8; 32];
-    for i in 0..32 {
-        dest_asset_bytes[i] = message
-            .get(70 + i as u32)
+    // Extract dest_asset (offset 94, 69 bytes, right-zero-padded).
+    // The full 69 bytes are read from the wire; the contract-id conversion uses
+    // the first 32 bytes. Issue #271 replaces this with Address::from_string.
+    let mut dest_asset_raw = [0u8; 69];
+    for i in 0..69 {
+        dest_asset_raw[i] = message
+            .get(94 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
-    let dest_asset = Address::from_contract_id(env, dest_asset_bytes);
+    let mut dest_asset_id = [0u8; 32];
+    dest_asset_id.copy_from_slice(&dest_asset_raw[..32]);
+    let dest_asset = Address::from_contract_id(env, dest_asset_id);
 
-    // Extract min_dest_amount (offset 102, 16 bytes, big-endian)
+    // Extract min_dest_amount (offset 163, 16 bytes, big-endian)
     let mut min_dest_amount_bytes = [0u8; 16];
     for i in 0..16 {
         min_dest_amount_bytes[i] = message
-            .get(102 + i as u32)
+            .get(163 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
     let min_dest_amount = i128::from_be_bytes(min_dest_amount_bytes);
 
-    // Extract deadline (offset 118, 8 bytes, big-endian)
+    // Extract deadline (offset 179, 8 bytes, big-endian)
     let mut deadline_bytes = [0u8; 8];
     for i in 0..8 {
         deadline_bytes[i] = message
-            .get(118 + i as u32)
+            .get(179 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
     let deadline = u64::from_be_bytes(deadline_bytes);
 
-    // Extract preferred_solver (offset 126, 32 bytes; if all zeros, None)
+    // Extract preferred_solver (offset 187, 32 bytes; if all zeros, None)
     let mut preferred_solver_bytes = [0u8; 32];
     for i in 0..32 {
         preferred_solver_bytes[i] = message
-            .get(126 + i as u32)
+            .get(187 + i as u32)
             .ok_or(PerihelionError::MalformedPayload)?;
     }
 
@@ -224,6 +232,7 @@ fn decode_fill_instruction(
         min_dest_amount,
         deadline,
         preferred_solver,
+        reservation_window: 0,
     })
 }
 
