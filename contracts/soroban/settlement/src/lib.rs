@@ -378,6 +378,27 @@ impl Perihelion {
         Ok(())
     }
 
+    /// Pause or unpause a specific corridor (endpoint id). Admin-only.
+    /// When paused, all inbound FillInstructions on that corridor are rejected,
+    /// effectively quarantining a single compromised chain without halting others
+    /// (issue #25, issue #287).
+    ///
+    /// Exit paths (dispatch_confirmation, cancel_expired_intent, on_cancel_inbound)
+    /// remain available even when a corridor is paused, to prevent fund stranding.
+    ///
+    /// Emits `paused_eid_set(eid, paused)` event.
+    pub fn set_paused_eid(env: Env, eid: u32, paused: bool) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedEid(eid), &paused);
+        env.events().publish(
+            (Symbol::new(&env, "paused_eid_set"),),
+            (eid, paused),
+        );
+        Ok(())
+    }
+
     /// Set the keeper reward paid to callers of `cancel_expired_intent`. Admin-only.
     /// A non-zero reward incentivizes third parties to refund expired intents,
     /// improving the liveness of the cancellation path (issue #173).
@@ -401,6 +422,87 @@ impl Perihelion {
         env.events().publish(
             (Symbol::new(&env, "keeper_reward_set"),),
             (reward,),
+        );
+        Ok(())
+    }
+
+    /// Set the per-intent maximum amount (value cap). Admin-only.
+    /// Rejects any intent with min_dest_amount > max_amount. Set to 0 to disable.
+    /// Issue #286: This cap is applied to the destination asset amount on Stellar
+    /// (denominated in 7 decimals for Stellar assets).
+    ///
+    /// Emits `max_intent_amount_set(max_amount)` event.
+    pub fn set_max_intent_amount(env: Env, max_amount: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if max_amount < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxIntentAmount, &max_amount);
+        env.events().publish(
+            (Symbol::new(&env, "max_intent_amount_set"),),
+            (max_amount,),
+        );
+        Ok(())
+    }
+
+    /// Set the rolling-window value cap. Admin-only.
+    /// Aggregates min_dest_amount across all intents registered within each duration window.
+    /// If the cumulative amount exceeds cap, the rolling-window breach is triggered.
+    /// Issue #286: This cap is applied to the destination asset amount on Stellar.
+    ///
+    /// # Parameters
+    /// - `duration`: rolling window size in seconds (0 to disable)
+    /// - `cap`: maximum aggregate amount per window (0 to disable)
+    ///
+    /// Emits `rolling_window_cap_set(duration, cap)` event.
+    pub fn set_rolling_window_cap(env: Env, duration: u64, cap: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if cap < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowDuration, &duration);
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowCap, &cap);
+        env.events().publish(
+            (Symbol::new(&env, "rolling_window_cap_set"),),
+            (duration, cap),
+        );
+        Ok(())
+    }
+
+    /// Reset the triggered rolling-window cap to allow new intents. Admin-only.
+    /// Must be called at or after RollingWindowResetEarliestAt to unblock registration.
+    /// Issue #286: Mirrors the EVM's resetRollingWindowCap behavior.
+    ///
+    /// Emits `rolling_window_cap_reset()` event.
+    pub fn reset_rolling_window_cap(env: Env) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        let now = env.ledger().timestamp();
+        if let Some(reset_at) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::RollingWindowResetEarliestAt)
+        {
+            if now < reset_at {
+                return Err(PerihelionError::DeadlineNotPassed);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowTriggered, &false);
+        env.storage()
+            .instance()
+            .remove(&DataKey::RollingWindowResetEarliestAt);
+        env.events().publish(
+            (Symbol::new(&env, "rolling_window_cap_reset"),),
+            (),
         );
         Ok(())
     }
@@ -450,23 +552,23 @@ impl Perihelion {
         }
 
         // Lazy-nonce replay guard (unordered delivery).
-        // NOTE: The eid-pause check is intentionally placed before nonce
-        // consumption. If a corridor is paused, the message is rejected without
-        // advancing the nonce, so it can be re-delivered once the corridor is
-        // unpaused. The global-pause check (if any) follows the same logic.
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::PausedEid(origin.src_eid))
-            .unwrap_or(false)
-        {
-            return Err(PerihelionError::ContractPaused);
-        }
-        Self::accept_nonce(&env, origin.src_eid, origin.nonce)?;
-
+        // NOTE: Pause checks are intentionally placed before nonce consumption.
+        // If paused, the message is rejected without advancing the nonce, so it
+        // can be re-delivered once unpaused. This is critical for correctness:
+        // a rejected message must remain re-deliverable.
         match message {
-            LzMessage::FillInstruction(fi) => Self::on_fill_instruction(&env, origin.src_eid, fi),
-            LzMessage::Cancel(ci) => Self::on_cancel_inbound(&env, ci),
+            LzMessage::FillInstruction(fi) => {
+                // FillInstruction registers new intents, so it's blocked by pause.
+                Self::require_eid_not_paused(&env, origin.src_eid)?;
+                Self::accept_nonce(&env, origin.src_eid, origin.nonce)?;
+                Self::on_fill_instruction(&env, origin.src_eid, fi)
+            }
+            LzMessage::Cancel(ci) => {
+                // CancelIntent is an exit path — it unwinds existing intents and
+                // remains available even during pause to prevent fund stranding.
+                Self::accept_nonce(&env, origin.src_eid, origin.nonce)?;
+                Self::on_cancel_inbound(&env, ci)
+            }
         }
     }
 
@@ -559,6 +661,10 @@ impl Perihelion {
     /// Permissionless: any party can pay to push a stuck confirmation through.
     /// Guarded against double-dispatch by a marker. Advances intent to `ConfirmationSent`.
     /// Returns error if the intent is not in `Filled` status or confirmation already sent.
+    ///
+    /// Note: This is an exit path — it completes a payment for value already delivered
+    /// on Stellar. A pause halting this path would strand solver funds with no recovery,
+    /// so it remains available even during a global pause (issue #288).
     pub fn dispatch_confirmation(
         env: Env,
         caller: Address,
@@ -566,7 +672,6 @@ impl Perihelion {
         lz_fee: i128,
     ) -> Result<(), PerihelionError> {
         caller.require_auth();
-        Self::require_not_paused(&env)?;
 
         // Guard against double-dispatch
         if env.storage().persistent().has(&DataKey::ConfirmationSent(intent_hash.clone())) {
@@ -717,6 +822,10 @@ impl Perihelion {
     /// If a keeper reward is configured (issue #173), the caller receives a refund to incentivize
     /// timely cancellation and improve refund liveness.
     ///
+    /// Note: This is an exit path — it refunds a user by dispatching a message and cannot
+    /// increase exposure. A pause halting this path would strand users' funds with no recovery,
+    /// so it remains available even during a global pause (issue #288).
+    ///
     /// # Keeper reward (issue #173)
     /// When `keeper_reward > 0`, the contract pays the caller a refund of XLM stroops,
     /// compensating for the LayerZero fee. This incentivizes third parties (keepers) to
@@ -731,7 +840,6 @@ impl Perihelion {
         lz_fee: i128,
     ) -> Result<(), PerihelionError> {
         caller.require_auth();
-        Self::require_not_paused(&env)?;
 
         // Cancelled marker: already cancelled — terminal, return IntentFinalized.
         if env
@@ -955,6 +1063,46 @@ impl Perihelion {
             .unwrap_or(0)
     }
 
+    /// Get the per-intent maximum amount cap. Returns 0 if unlimited (issue #286).
+    pub fn get_max_intent_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxIntentAmount)
+            .unwrap_or(0)
+    }
+
+    /// Get the rolling-window duration in seconds. Returns 0 if disabled (issue #286).
+    pub fn get_rolling_window_duration(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowDuration)
+            .unwrap_or(0)
+    }
+
+    /// Get the rolling-window cap. Returns 0 if unlimited (issue #286).
+    pub fn get_rolling_window_cap(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowCap)
+            .unwrap_or(0)
+    }
+
+    /// Check if the rolling-window cap has been triggered. Returns true if breached (issue #286).
+    pub fn is_rolling_window_cap_triggered(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowTriggered)
+            .unwrap_or(false)
+    }
+
+    /// Get the earliest timestamp at which the rolling-window cap can be reset.
+    /// Returns None if not triggered (issue #286).
+    pub fn get_rolling_window_reset_earliest_at(env: Env) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RollingWindowResetEarliestAt)
+    }
+
     /// PROPOSED Phase 3: Fetch aggregate reputation metrics for a solver.
     /// Returns None if the solver has never filled an intent.
     pub fn get_solver_reputation(env: Env, solver: Address) -> Option<SolverReputationRecord> {
@@ -1153,7 +1301,7 @@ impl Perihelion {
             return Err(PerihelionError::DeadlineTooFar);
         }
 
-        // Issue #15: verify that a peer is configured for fi.src_eid BEFORE
+        // Issue #15/#289: verify that a peer is configured for transport_src_eid BEFORE
         // registering the intent. If no peer exists for this eid, dispatch
         // (FillConfirmed / CancelIntent) will fail at settlement time with
         // UntrustedPeer, permanently stranding the intent. Rejecting here
@@ -1174,13 +1322,12 @@ impl Perihelion {
         //   funds. For well-formed messages from a compliant EVM escrow these
         //   two values are always equal (the escrow sets fi.src_eid = stellarEid
         //   which is the Stellar endpoint id, NOT its own eid; see the EVM codec).
-        //   In practice the two are the same on all known deployments, but we
-        //   guard on fi.src_eid here because that is what dispatch uses at
-        //   settlement time.
+        //   We validate against transport_src_eid because that is what dispatch
+        //   will use at settlement time (stored in rec.src_eid).
         if !env
             .storage()
             .instance()
-            .has(&DataKey::Peer(fi.src_eid))
+            .has(&DataKey::Peer(transport_src_eid))
         {
             return Err(PerihelionError::UntrustedPeer);
         }
