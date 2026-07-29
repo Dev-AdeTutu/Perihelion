@@ -1,0 +1,44 @@
+version: 2
+
+updates:
+  # npm workspaces: root manifest plus sdk, relayer, solver, mempool, test.
+  # Dependabot resolves the workspace tree from the root package.json, so a
+  # single entry covers all five workspaces' package.json files.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      types:
+        patterns:
+          - "@types/*"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+
+  # Soroban (Rust) settlement contract.
+  - package-ecosystem: cargo
+    directory: "/contracts/soroban"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+
+  # Actions pinned across ci.yml, coverage.yml, dependency-audit.yml,
+  # differential-fuzz.yml, docs.yml, evm.yml, mutation-testing.yml,
+  # pr-title-lint.yml, soroban.yml.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - ci
