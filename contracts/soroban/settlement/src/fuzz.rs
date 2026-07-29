@@ -321,7 +321,11 @@ proptest! {
         assert_eq!(decoded_reason, reason, "reason mismatch");
     }
 
-    /// Mutation: unknown reason codes (outside [0, 2]) must be rejected.
+    /// Mutation: unknown reason codes (outside [0, 2]) must be rejected by BOTH sides.
+    ///
+    /// This test verifies symmetry: the Rust decoder rejects bad reason codes, and the
+    /// same payload is exported to the corpus so the Solidity differential harness can
+    /// assert the EVM decoder also rejects it. Both sides must behave identically.
     #[test]
     fn prop_cancel_intent_unknown_reason(
         intent_hash in arb_hash(),
@@ -340,9 +344,17 @@ proptest! {
         assert_eq!(encoded.len(), 35);
         export_to_corpus("cancel_intent_bad_reason", &encoded);
 
-        // The Rust decoder rejects unknown reason codes — verify.
-        // (The actual rejection happens in decode_cancel_intent, which we'd need to call
-        // here if we want to test the Rust side. For now we just export the corpus.)
+        // Verify the Rust decoder also rejects the bad reason code.
+        // This closes the differential-fuzz gap: previously the test only exported
+        // the corpus payload but never asserted the Rust side rejects it, meaning
+        // a regression in the Rust decoder (e.g., accidentally accepting all reason
+        // codes) would go undetected even while the Solidity side correctly rejected.
+        let decode_result = crate::messages::decode_message(&env, &encoded);
+        prop_assert!(
+            decode_result.is_err(),
+            "Rust decoder must reject unknown reason code 0x{:02x}, but it accepted the payload",
+            bad_reason
+        );
     }
 }
 
