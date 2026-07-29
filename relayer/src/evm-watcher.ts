@@ -101,30 +101,10 @@ const LOCKED_EVENT_ABI = [
 ] as const;
 
 /**
- * keccak256("Locked(bytes32,address,address,address,uint256)")
- *
- * Pre-computed so we can filter logs without viem's `getAbi` overhead.
- * Verified against the contract source:
- *   keccak256("Locked(bytes32,address,address,address,uint256)")
- *   = 0x9f4a8c8b6e7e0e3d2e9f4a8c8b6e7e0e3d2e9f4a8c8b6e7e0e3d2e9f4a8c8b (placeholder)
- *
- * In production this should be computed at build time or derived from the ABI.
- */
-const LOCKED_TOPIC = "0x24abdb5865df5079dcc5ac590ff6f01d5c16edbc5fab4e195d9febd1114503da" as Hex;
-
-/**
  * ABI parameters for decoding the non-indexed `Locked` event data:
  *   (address asset, uint256 amount)
  */
 const LOCKED_DATA_PARAMS = parseAbiParameters("address asset, uint256 amount");
-
-/**
- * ABI parameters for decoding the `lock(Intent intent, bytes signature)` calldata.
- * The Intent struct fields, in declaration order:
- */
-const INTENT_PARAMS = parseAbiParameters(
-  "address user, string destination, uint256 sourceChainId, address sourceAsset, uint256 sourceAmount, string destAsset, uint256 minDestAmount, uint256 deadline, uint256 nonce, address preferredSolver",
-);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -172,7 +152,7 @@ export class EVMSourceWatcher implements SourceWatcher {
 
   async poll(
     fromBlock: number,
-  ): Promise<{ messages: PendingMessage[]; head: number; headHash?: string; parentHash?: string }> {
+  ): Promise<{ messages: PendingMessage[]; head: number; headHash?: string; parentHash?: string; blockHeaders?: Array<{ number: number; hash: string; parentHash: string }> }> {
     const currentBlock = await this.client.getBlockNumber();
     const head = Number(currentBlock);
 
@@ -182,6 +162,10 @@ export class EVMSourceWatcher implements SourceWatcher {
     const parentHash = latestBlock.parentHash as string | undefined;
 
     // Query Locked events in chunked ranges to avoid provider limits.
+    // Block numbers that emitted messages, accumulated across chunks; their
+    // headers are fetched after the scan to enable reorg detection deeper
+    // than a single block.
+    const blocksWithMessages = new Set<number>();
     const messages: PendingMessage[] = [];
     let scanHead = fromBlock;
 
@@ -210,6 +194,12 @@ export class EVMSourceWatcher implements SourceWatcher {
         throw err;
       }
 
+      for (const log of logs) {
+        if (log.blockNumber !== undefined && log.blockNumber !== null) {
+          blocksWithMessages.add(Number(log.blockNumber));
+        }
+      }
+
       // Batch decode with concurrency-limited transaction fetches.
       const pendingDecodings = logs.map((log) => this.decodeLockedLog(log));
       const decodedMessages = await this._batchConcurrent(
@@ -226,7 +216,28 @@ export class EVMSourceWatcher implements SourceWatcher {
       scanHead = toBlock + 1;
     }
 
-    return { messages, head, headHash, parentHash };
+    // Collect block headers for the blocks that emitted messages, so the
+    // relayer can detect reorgs deeper than one block.
+    const blockHeaders: Array<{ number: number; hash: string; parentHash: string }> = [];
+    if (headHash !== undefined && parentHash !== undefined) {
+      for (const blockNum of blocksWithMessages) {
+        try {
+          const block = await this.client.getBlock({ blockNumber: BigInt(blockNum) });
+          if (block.hash && block.parentHash) {
+            blockHeaders.push({
+              number: blockNum,
+              hash: block.hash,
+              parentHash: block.parentHash as string,
+            });
+          }
+        } catch {
+          // If we can't fetch a block's header, skip it; reorg detection
+          // degrades gracefully but continues.
+        }
+      }
+    }
+
+    return { messages, head, headHash, parentHash, blockHeaders: blockHeaders.length > 0 ? blockHeaders : undefined };
   }
 
   private _isProviderRangeError(err: unknown): boolean {

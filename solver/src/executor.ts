@@ -9,6 +9,13 @@
 import type { SignedIntent } from "@perihelion/sdk";
 import { getAddress, type Hex } from "viem";
 
+/** Logger interface for structured logging. */
+export interface Logger {
+  info(msg: string, meta?: Record<string, unknown>): void;
+  warn(msg: string, meta?: Record<string, unknown>): void;
+  error(msg: string, meta?: Record<string, unknown>): void;
+}
+
 /** Configuration for executor (keys and RPC endpoints). */
 export interface ExecutorConfig {
   /** EVM RPC URL (Ethereum, Base, etc.) */
@@ -47,8 +54,9 @@ export class Executor {
   private readonly escrowAddress: `0x${string}`;
   private readonly settlementContractId: string;
   private readonly sourceChainId: number;
+  private readonly logger: Logger;
 
-  constructor(config: ExecutorConfig) {
+  constructor(config: ExecutorConfig, logger: Logger = console) {
     this.evmRpcUrl = config.evmRpcUrl;
     this.sorobanRpcUrl = config.sorobanRpcUrl;
     this.evmPrivateKey = config.evmPrivateKey;
@@ -56,6 +64,7 @@ export class Executor {
     this.escrowAddress = config.escrowAddress;
     this.settlementContractId = config.settlementContractId;
     this.sourceChainId = config.sourceChainId;
+    this.logger = logger;
   }
 
   /**
@@ -105,10 +114,7 @@ export class Executor {
    * via the Stellar SDK to query the settlement state.
    */
   private async isSettled(_intentHash: Hex): Promise<boolean> {
-    // TODO: Implement via Stellar SDK
-    // This would call: settlement_contract.is_settled(intent_hash)
-    // For now, assume not settled so fills can proceed
-    return false;
+    throw new Error("Executor not implemented: isSettled (Soroban)");
   }
 
   /**
@@ -119,28 +125,7 @@ export class Executor {
    * The transaction includes the user's source funds locked against intent_hash.
    */
   private async lockOnEvm(signed: SignedIntent): Promise<Hex> {
-    const { intent, signature, hash } = signed;
-
-    // TODO: Implement via viem
-    // This would construct the Intent struct and call:
-    // walletClient.writeContract({
-    //   address: this.escrowAddress,
-    //   abi: escrowAbi,
-    //   functionName: "lock",
-    //   args: [intent, signature],
-    //   value: layerZeroFee,
-    // })
-
-    // For now, return a mock transaction hash
-    console.info("locking on EVM escrow", {
-      intentHash: hash,
-      escrow: this.escrowAddress,
-      user: intent.user,
-      amount: intent.sourceAmount,
-    });
-
-    // In a real implementation, await the lock transaction confirmation
-    return hash;
+    throw new Error("Executor not implemented: lockOnEvm (EVM)");
   }
 
   /**
@@ -151,22 +136,7 @@ export class Executor {
    * function, which transfers the destination asset to the user and dispatches
    * a FillConfirmed message to the source chain via LayerZero.
    */
-  private async fillOnSoroban(_signed: SignedIntent, lockTx: Hex): Promise<Hex> {
-    // TODO: Implement via Stellar SDK
-    // This would call: settlement_contract.fill_intent(
-    //   solver_address,
-    //   solver_evm_bytes32,
-    //   intent_hash,
-    //   fill_amount,
-    //   lz_fee
-    // )
-
-    // For now, return a mock transaction hash (same as lock for simplicity)
-    console.info("filling on Soroban settlement", {
-      lockTx,
-    });
-
-    // In a real implementation, await the settlement transaction confirmation
-    return lockTx;
+  private async fillOnSoroban(_signed: SignedIntent, _lockTx: Hex): Promise<Hex> {
+    throw new Error("Executor not implemented: fillOnSoroban (Soroban)");
   }
 }

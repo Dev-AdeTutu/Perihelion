@@ -46,17 +46,21 @@
  * # TYPE relayer_dead_lettered_total counter
  * relayer_dead_lettered_total 1
  *
- * # HELP relayer_cursor_lag_blocks Blocks between current head and relayer cursor
+ * # HELP relayer_cursor_lag_blocks Blocks between confirmed head and relayer cursor
  * # TYPE relayer_cursor_lag_blocks gauge
- * relayer_cursor_lag_blocks 6
+ * relayer_cursor_lag_blocks 5
  *
  * # HELP relayer_cursor_block Current relay cursor (last confirmed block processed)
  * # TYPE relayer_cursor_block gauge
  * relayer_cursor_block 100
  *
+ * # HELP relayer_confirmed_head_block Confirmed head (latest block with sufficient confirmations)
+ * # TYPE relayer_confirmed_head_block gauge
+ * relayer_confirmed_head_block 105
+ *
  * # HELP relayer_head_block Latest chain head seen
  * # TYPE relayer_head_block gauge
- * relayer_head_block 106
+ * relayer_head_block 111
  *
  * # HELP relayer_last_tick_timestamp_seconds Unix timestamp of last successful tick
  * # TYPE relayer_last_tick_timestamp_seconds gauge
@@ -263,13 +267,17 @@ export class HealthServer {
       "# TYPE relayer_max_retry_depth gauge",
       `relayer_max_retry_depth ${m.maxRetryDepth}`,
       "",
-      "# HELP relayer_cursor_lag_blocks Blocks between current head and relayer cursor",
+      "# HELP relayer_cursor_lag_blocks Blocks between confirmed head and relayer cursor",
       "# TYPE relayer_cursor_lag_blocks gauge",
       `relayer_cursor_lag_blocks ${r.lag}`,
       "",
       "# HELP relayer_cursor_block Current relay cursor (last confirmed block processed)",
       "# TYPE relayer_cursor_block gauge",
       `relayer_cursor_block ${r.cursor}`,
+      "",
+      "# HELP relayer_confirmed_head_block Confirmed head (latest block with sufficient confirmations)",
+      "# TYPE relayer_confirmed_head_block gauge",
+      `relayer_confirmed_head_block ${r.confirmedHead}`,
       "",
       "# HELP relayer_head_block Latest chain head seen",
       "# TYPE relayer_head_block gauge",

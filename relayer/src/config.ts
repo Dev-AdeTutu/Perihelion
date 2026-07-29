@@ -52,7 +52,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
 
   // --- Optional with sane defaults but must not be NaN/negative if set ---
   const confirmations = Number(env.PERIHELION_CONFIRMATIONS ?? 6);
-  if (Number.isNaN(confirmations) || confirmations < 0) {
+  if (Number.isNaN(confirmations) || confirmations < 0 || !Number.isInteger(confirmations)) {
     errors.push(
       `PERIHELION_CONFIRMATIONS must be a non-negative integer, got: "${env.PERIHELION_CONFIRMATIONS}"`,
     );

@@ -56,12 +56,17 @@ export interface SourceWatcher {
    * `headHash` is the block hash of `head`; `parentHash` is the parent of
    * `head`.  Both are used for reorg detection.  Implementations that cannot
    * supply them may omit these fields; reorg detection is then disabled.
+   *
+   * `blockHeaders` (optional) provides block records for intermediate blocks
+   * in the scanned range (fromBlock through head). If supplied, the relayer
+   * records all of them for deeper reorg detection.
    */
   poll(fromBlock: number): Promise<{
     messages: PendingMessage[];
     head: number;
     headHash?: string;
     parentHash?: string;
+    blockHeaders?: Array<{ number: number; hash: string; parentHash: string }>;
   }>;
 }
 
@@ -147,7 +152,9 @@ export interface ReadinessState {
   cursor: number;
   /** Latest chain head seen in the most recent poll. */
   head: number;
-  /** Lag = head − cursor. High lag means the relayer is falling behind. */
+  /** Confirmed head (latest block with sufficient confirmations). */
+  confirmedHead: number;
+  /** Lag = confirmedHead + 1 − cursor. High lag means the relayer is falling behind. */
   lag: number;
 }
 
@@ -179,6 +186,7 @@ export class Relayer {
     lastTickAt: 0,
     cursor: 0,
     head: 0,
+    confirmedHead: 0,
     lag: 0,
   };
 
@@ -261,7 +269,7 @@ export class Relayer {
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
-    const { messages, head, headHash, parentHash } = await this.watcher.poll(this.cursor);
+    const { messages, head, headHash, parentHash, blockHeaders } = await this.watcher.poll(this.cursor);
 
     // Reorg detection — only when the watcher provides block hashes.
     if (headHash !== undefined && parentHash !== undefined) {
@@ -285,15 +293,22 @@ export class Relayer {
           this.readiness.cursor = this.cursor;
         }
       }
+      // Record intermediate block headers if provided.
+      if (blockHeaders) {
+        for (const block of blockHeaders) {
+          this.recordBlock(block);
+        }
+      }
       this.recordBlock({ number: head, hash: headHash, parentHash });
     }
 
-    const confirmedHead = head - this.config.confirmations;
+    const confirmedHead = Math.max(0, head - this.config.confirmations);
     const results: RelayResult[] = [];
 
     // Update readiness lag.
     this.readiness.head = head;
-    this.readiness.lag = Math.max(0, head - this.cursor);
+    this.readiness.confirmedHead = confirmedHead;
+    this.readiness.lag = Math.max(0, confirmedHead + 1 - this.cursor);
 
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
