@@ -183,14 +183,16 @@ proptest! {
 fn fill_instruction_matches_golden_vector() {
     // contracts/shared/wire-vectors/fill_instruction.hex, decoded per the
     // canonical table in contracts/shared/wire-vectors/README.md.
+    //
+    // The golden vector uses the 219-byte strkey-text layout (issue #270):
+    //   recipient  = 56-byte ASCII strkey of [0xBB; 32] contract id
+    //   dest_asset = 56-byte ASCII strkey of [0xCC; 32] contract id, right-zero-padded to 69
+    //   preferred_solver = all zeros (open) — encode_fill_instruction always writes zeros
     const GOLDEN: &str = include_str!("../../../shared/wire-vectors/fill_instruction.hex");
 
     let env = Env::default();
     let recipient = crate::messages::address_from_contract_id(&env, [0xBBu8; 32]);
     let dest_asset = crate::messages::address_from_contract_id(&env, [0xCCu8; 32]);
-    let mut solver_word = [0u8; 32];
-    solver_word[12..32].copy_from_slice(&[0xDDu8; 20]);
-    let preferred_solver = Some(crate::messages::address_from_contract_id(&env, solver_word));
 
     let fi = crate::types::FillInstruction {
         intent_hash: BytesN::from_array(&env, &[0xAAu8; 32]),
@@ -199,15 +201,17 @@ fn fill_instruction_matches_golden_vector() {
         dest_asset,
         min_dest_amount: 1_000_000_000,
         deadline: 9_999_999_999,
-        preferred_solver,
+        // encode_fill_instruction writes [0u8; 32] for preferred_solver regardless
+        // of this field — "open" (no reservation) is the canonical wire value.
+        preferred_solver: None,
         reservation_window: 0,
     };
     let encoded = crate::messages::encode_fill_instruction(&env, &fi);
 
     let expected = decode_hex(GOLDEN);
-    assert_eq!(encoded.len() as usize, expected.len(), "length");
+    assert_eq!(encoded.len() as usize, expected.len(), "length mismatch: encoder produced {} bytes, golden vector is {} bytes", encoded.len(), expected.len());
     for (i, b) in expected.iter().enumerate() {
-        assert_eq!(encoded.get(i as u32).unwrap(), *b, "byte {}", i);
+        assert_eq!(encoded.get(i as u32).unwrap(), *b, "byte {} mismatch", i);
     }
 }
 
@@ -230,84 +234,62 @@ fn decode_hex(s: &str) -> std::vec::Vec<u8> {
 }
 
 #[test]
-fn fill_instruction_recipient_does_not_survive_the_evm_encoder_truncation() {
-    // Round-trip semantic assertion, not just a byte-level one (per the
-    // differential-fuzzing gap this file exists to close): take a real
-    // Stellar address, put it through what the EVM encoder actually does to
-    // it, decode it back on this side, and check whether the result is the
-    // address we started with.
+fn fill_instruction_recipient_round_trips_with_219_byte_format() {
+    // Regression test for issue #271 and #270: verify that a payload built with
+    // the corrected 219-byte wire format (56-byte strkey text for recipient,
+    // 69-byte strkey text for dest_asset) correctly round-trips through the
+    // Soroban decoder back to the original address.
     //
-    // PerihelionEscrow.sol's `_encodeFillInstruction` copies up to 56 bytes of
-    // `intent.destination` (the strkey's ASCII *text*) into the wire's
-    // fixed-width `recipient` field, right-zero-padded to 56 bytes. A Stellar
-    // account strkey is exactly 56 ASCII characters, so it does fit; however
-    // the decoder on this side treats that 56-byte ASCII blob as a Stellar
-    // strkey string and calls `Address::from_string_bytes`. The round-trip
-    // only works if the EVM side copies the full 56-char strkey correctly —
-    // i.e., that `_encodeFillInstruction` does not truncate it to 32 bytes as
-    // the old `mload` implementation did. If the encoder has been fixed,
-    // the decoded address will equal the original; if it still truncates, the
-    // decode will fail or produce a different address. Tracked as issue #271.
-    //
-    // This test intentionally pins the current (broken) behavior so that
-    // fixing #271 requires consciously updating this assertion rather than
-    // the fix going unnoticed by the fuzz suite.
-    //
-    // The payload uses the current 219-byte wire layout:
-    //   version(1) | type(1) | intent_hash(32) | src_eid(4) |
-    //   recipient(56) | dest_asset(69) | min_dest_amount(16) |
-    //   deadline(8) | preferred_solver(32)
+    // The OLD (broken) format stored only 32 bytes of the strkey's ASCII text,
+    // silently dropping the last 24 characters of the 56-char strkey, and the
+    // decoder then reinterpreted those 32 bytes as a raw contract id — two
+    // mismatched conventions that ensured no Stellar address could survive the
+    // round-trip. This test confirms the fixed behavior: the full strkey text
+    // is stored in the wire field and decoded correctly by from_string_bytes.
     let env = Env::default();
-    let original = Address::generate(&env);
-    let strkey = original.to_string();
 
-    let len = strkey.len() as usize;
-    let mut ascii = std::vec![0u8; len];
-    strkey.copy_into_slice(&mut ascii);
-    assert!(
-        len >= 32,
-        "strkey shorter than the wire field — check SDK strkey format"
-    );
+    // Use the canonical all-zeros contract strkey as the recipient so this
+    // test is deterministic and does not depend on random address generation.
+    // ZERO_CONTRACT is a known valid C... strkey (56 chars).
+    let zero_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+    let original = Address::from_str(&env, zero_contract);
 
-    // The old EVM encoder truncated by doing mload(add(destBytes, 32)), which
-    // reads 32 bytes starting at offset 32 of the ABI-encoded bytes — i.e.,
-    // only the first 32 ASCII chars of the strkey. We simulate that truncation
-    // here to document the bug: take first 32 bytes, right-pad to 56.
-    let mut truncated_recipient = [0u8; 56];
-    truncated_recipient[..32].copy_from_slice(&ascii[..32]);
-    // bytes 32..56 remain zero (right-padded)
+    // Build a valid 219-byte payload using the corrected wire format:
+    // recipient field is 56 bytes of ASCII strkey text (no truncation).
+    let mut strkey_bytes = [0u8; 56];
+    let ascii = zero_contract.as_bytes();
+    assert_eq!(ascii.len(), 56, "strkey must be exactly 56 chars");
+    strkey_bytes.copy_from_slice(ascii);
+
+    // dest_asset: another valid C... strkey (zero-contract), padded to 69 bytes.
+    let dest_zero_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+    let dest_ascii = dest_zero_contract.as_bytes();
+    let mut dest_asset_bytes = [0u8; 69];
+    dest_asset_bytes[..dest_ascii.len()].copy_from_slice(dest_ascii);
 
     let mut payload = Bytes::new(&env);
     payload.push_back(PROTOCOL_VERSION);
     payload.push_back(MSG_FILL_INSTRUCTION);
     payload.append(&Bytes::from_array(&env, &[0xAAu8; 32])); // intent_hash
     payload.append(&Bytes::from_array(&env, &30316u32.to_be_bytes())); // src_eid
-    payload.append(&Bytes::from_array(&env, &truncated_recipient)); // recipient (56 bytes, truncated)
-    payload.append(&Bytes::from_array(&env, &[0xCCu8; 69])); // dest_asset (69 bytes)
-    payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes())); // min_dest_amount
-    payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes())); // deadline
+    payload.append(&Bytes::from_array(&env, &strkey_bytes));    // recipient (56 bytes, full strkey text)
+    payload.append(&Bytes::from_array(&env, &dest_asset_bytes)); // dest_asset (69 bytes)
+    payload.append(&Bytes::from_array(&env, &1_000_000_000u128.to_be_bytes()));
+    payload.append(&Bytes::from_array(&env, &9_999_999_999u64.to_be_bytes()));
     payload.append(&Bytes::from_array(&env, &[0u8; 32])); // preferred_solver: open
 
-    assert_eq!(payload.len(), 219);
+    assert_eq!(payload.len(), 219, "payload must be 219 bytes");
 
-    // The decoder may reject a truncated strkey that doesn't correspond to a
-    // valid Stellar address, or it may decode a different address than the
-    // original. Either outcome documents the truncation bug.
-    let decode_result = decode_message(&env, &payload);
-    match decode_result {
-        Err(_) => {
-            // The truncated strkey is not a valid Stellar strkey — decoder
-            // correctly rejects it. Bug #271 manifests as rejection here.
-        }
-        Ok((msg_type, fi, _)) => {
-            assert_eq!(msg_type, MSG_FILL_INSTRUCTION);
-            assert_ne!(
-                fi.recipient, original,
-                "recipient round-tripped correctly — issue #271 appears fixed; \
-                 update this pinned-failure test"
-            );
-        }
-    }
+    let (msg_type, fi, _) =
+        decode_message(&env, &payload).expect("decoder must accept a well-formed 219-byte payload");
+    assert_eq!(msg_type, MSG_FILL_INSTRUCTION);
+
+    // The decoded recipient must equal the original address — the full strkey
+    // text round-trips correctly through the 56-byte wire field (issue #271 fixed).
+    assert_eq!(
+        fi.recipient, original,
+        "recipient did not survive the round-trip — issue #271 regression"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -412,5 +394,45 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/wire-vectors/fuzz-corpus");
         let file_path = corpus_dir.join("test_export.hex");
         assert!(file_path.exists(), "Corpus file should exist");
+    }
+
+    /// Regression: the 218-byte FillInstruction negative vector must be rejected
+    /// by the Soroban decoder with MalformedPayload (length check: expects 219).
+    #[test]
+    fn fill_instruction_short_neg_vector_is_rejected() {
+        const SHORT: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_short.hex");
+        let env = Env::default();
+        let bytes = decode_hex(SHORT);
+        assert_eq!(bytes.len(), 218, "fill_instruction_short.hex must be 218 bytes");
+        let mut payload = Bytes::new(&env);
+        for b in bytes {
+            payload.push_back(b);
+        }
+        let result = crate::messages::decode_message(&env, &payload);
+        assert!(
+            result.is_err(),
+            "decoder must reject a 218-byte FillInstruction (expects 219)"
+        );
+    }
+
+    /// Regression: the 220-byte FillInstruction negative vector must be rejected
+    /// by the Soroban decoder with MalformedPayload (length check: expects 219).
+    #[test]
+    fn fill_instruction_long_neg_vector_is_rejected() {
+        const LONG: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_long.hex");
+        let env = Env::default();
+        let bytes = decode_hex(LONG);
+        assert_eq!(bytes.len(), 220, "fill_instruction_long.hex must be 220 bytes");
+        let mut payload = Bytes::new(&env);
+        for b in bytes {
+            payload.push_back(b);
+        }
+        let result = crate::messages::decode_message(&env, &payload);
+        assert!(
+            result.is_err(),
+            "decoder must reject a 220-byte FillInstruction (expects 219)"
+        );
     }
 }

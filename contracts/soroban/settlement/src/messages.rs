@@ -376,7 +376,6 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
     b.append(&Bytes::from_array(env, &[0u8; 32]));
     b
 }
-}
 
 /// Decode a `CancelIntent` payload (35 bytes):
 /// `version(1) | type(1) | intent_hash(32) | reason(1)`.
@@ -416,8 +415,10 @@ fn decode_cancel_intent(
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::string::ToString;
+
     use super::*;
-    use soroban_sdk::testutils::Env as _;
 
     // A known valid G... account strkey (all-zeros account).
     const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -481,7 +482,7 @@ mod tests {
     fn test_decode_fill_instruction_strkey_addresses() {
         let env = Env::default();
 
-        // Build a 219-byte payload manually, matching the updated wire format.
+        // Build a 219-byte payload manually.
         let mut msg = Bytes::new(&env);
 
         // version + type
@@ -499,13 +500,15 @@ mod tests {
         msg.push_back(0x00);
         msg.push_back(0x01);
 
-        // recipient (56 bytes): ZERO_ACCOUNT right-zero-padded
+        // recipient (56 bytes): Use a real G... account strkey (ZERO_ACCOUNT).
+        // Stellar strkeys are exactly 56 ASCII characters; no zero-padding needed.
         let recip_bytes = ZERO_ACCOUNT.as_bytes();
         for i in 0..56usize {
             msg.push_back(if i < recip_bytes.len() { recip_bytes[i] } else { 0 });
         }
 
-        // dest_asset (69 bytes): ZERO_CONTRACT right-zero-padded
+        // dest_asset (69 bytes): Use a real C... contract strkey (ZERO_CONTRACT).
+        // ZERO_CONTRACT is 56 chars; pad the remaining 13 bytes with zeros.
         let asset_bytes = ZERO_CONTRACT.as_bytes();
         for i in 0..69usize {
             msg.push_back(if i < asset_bytes.len() { asset_bytes[i] } else { 0 });
