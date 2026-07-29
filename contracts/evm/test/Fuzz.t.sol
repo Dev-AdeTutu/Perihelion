@@ -28,6 +28,7 @@ contract PerihelionEscrowFuzzTest is Test {
         token.mint(user, type(uint128).max);
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(token), true);
         vm.deal(solver, 100 ether);
     }
 
@@ -70,7 +71,7 @@ contract PerihelionEscrowFuzzTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
 
         assertEq(token.balanceOf(address(escrow)), amount);
-        (,,, uint256 held,,,) = escrow.locks(h);
+        (,,, uint256 held,,,,) = escrow.locks(h);
         assertEq(held, amount);
     }
 
@@ -124,7 +125,7 @@ contract PerihelionEscrowFuzzTest is Test {
             escrow.cancelExpired(h);
             assertEq(token.balanceOf(user), userBefore + 100_000); // user made whole
             assertEq(token.balanceOf(address(escrow)), 0);
-            (,,,,,, bool refunded) = escrow.locks(h);
+            (,,,,,,, bool refunded) = escrow.locks(h);
             assertTrue(refunded);
         }
     }

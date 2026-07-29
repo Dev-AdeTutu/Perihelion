@@ -121,6 +121,7 @@ contract IntegrationTest is Test {
         token.mint(user, 1_000_000);
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
+        escrow.setAssetAllowed(address(token), true);
         vm.deal(solver, 10 ether);
     }
 
@@ -163,7 +164,7 @@ contract IntegrationTest is Test {
 
         assertEq(token.balanceOf(solver), 100_000);
         assertEq(token.balanceOf(address(escrow)), 0);
-        (,,,,, bool released, bool refunded) = escrow.locks(h);
+        (,,,,,, bool released, bool refunded) = escrow.locks(h);
         assertTrue(released);
         assertFalse(refunded);
     }
@@ -186,7 +187,7 @@ contract IntegrationTest is Test {
         relay.deliverCancel(h, 0); // CANCEL_REASON_EXPIRED
 
         assertEq(token.balanceOf(user), 1_000_000);
-        (,,,,,, bool refunded) = escrow.locks(h);
+        (,,,,,,, bool refunded) = escrow.locks(h);
         assertTrue(refunded);
     }
 

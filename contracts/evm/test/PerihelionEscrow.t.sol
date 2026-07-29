@@ -276,7 +276,8 @@ contract PerihelionEscrowTest is Test {
         address indexed solver,
         uint256 amount,
         uint128 fillAmount,
-        uint64 fillLedger
+        uint64 fillLedger,
+        uint128 minDestAmount
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PeerSet(bytes32 peer);
@@ -299,6 +300,8 @@ contract PerihelionEscrowTest is Test {
         token.mint(user, 1_000_000);
         vm.prank(user);
         token.approve(address(escrow), type(uint256).max);
+
+        escrow.setAssetAllowed(address(token), true);
 
         vm.deal(solver, 10 ether);
     }
@@ -406,7 +409,7 @@ contract PerihelionEscrowTest is Test {
             address lSolver,
             address lUser,
             address lAsset,
-            uint256 lAmount,,
+            uint256 lAmount,,,
             bool released,
             bool refunded
         ) = escrow.locks(h);
@@ -434,7 +437,7 @@ contract PerihelionEscrowTest is Test {
 
         // Escrow records only what actually arrived (99_000), not the 100_000 sent.
         assertEq(feeToken.balanceOf(address(escrow)), 99_000);
-        (,,, uint256 lAmount,,,) = escrow.locks(h);
+        (,,, uint256 lAmount,,,,) = escrow.locks(h);
         assertEq(lAmount, 99_000);
     }
 
@@ -490,6 +493,55 @@ contract PerihelionEscrowTest is Test {
 
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.InvalidSignature.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    // --- Asset allowlist (Issue #335) ----------------------------------------
+
+    function test_RevertWhen_AssetNotAllowed() public {
+        MockERC20 unknownToken = new MockERC20();
+        unknownToken.mint(user, 1_000_000);
+        vm.prank(user);
+        unknownToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(unknownToken);
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.AssetNotAllowed.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_SetAssetAllowed() public {
+        MockERC20 newToken = new MockERC20();
+        newToken.mint(user, 1_000_000);
+        vm.prank(user);
+        newToken.approve(address(escrow), type(uint256).max);
+
+        escrow.setAssetAllowed(address(newToken), true);
+        assertTrue(escrow.assetAllowed(address(newToken)));
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(newToken);
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(newToken.balanceOf(address(escrow)), 100_000);
+    }
+
+    function test_RevokeAssetAllowed() public {
+        assertTrue(escrow.assetAllowed(address(token))); // allowed by default in setUp
+
+        escrow.setAssetAllowed(address(token), false);
+        assertFalse(escrow.assetAllowed(address(token)));
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.AssetNotAllowed.selector);
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
@@ -562,13 +614,13 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000, 100_000, 12_345);
+        emit Released(h, solver, 100_000, 100_000, 12_345, 990_000);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
         assertEq(token.balanceOf(address(escrow)), 0);
 
-        (,,,,, bool released,) = escrow.locks(h);
+        (,,,,,, bool released,) = escrow.locks(h);
         assertTrue(released);
     }
 
@@ -596,7 +648,7 @@ contract PerihelionEscrowTest is Test {
         _cancel(h, 1);
 
         assertEq(token.balanceOf(user), 1_000_000);
-        (,,,,,, bool refunded) = escrow.locks(h);
+        (,,,,,,, bool refunded) = escrow.locks(h);
         assertTrue(refunded);
     }
 
@@ -920,7 +972,7 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
 
         assertEq(noReturnToken.balanceOf(address(escrow)), 100_000);
-        (,,, uint256 lAmount,,,) = escrow.locks(h);
+        (,,, uint256 lAmount,,,,) = escrow.locks(h);
         assertEq(lAmount, 100_000);
     }
 
@@ -952,6 +1004,44 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.NothingReceived.selector);
         escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    // --- Under-delivery enforcement (Issue #334) ----
+
+    /// @notice Verify that fillAmount below minDestAmount reverts with UnderDelivered.
+    function test_RevertWhen_FillConfirmedUnderDelivered() public {
+        bytes32 h = _lock();
+
+        // Craft a FillConfirmed with fillAmount < minDestAmount (990_000)
+        bytes memory msgUnderDelivered = abi.encodePacked(
+            V,
+            T_FILL_CONFIRMED,
+            h,
+            bytes32(uint256(uint160(solver))),
+            uint128(989_999), // below minDestAmount of 990_000
+            uint64(12_345)
+        );
+        vm.expectRevert(PerihelionEscrow.UnderDelivered.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgUnderDelivered);
+    }
+
+    /// @notice Verify that fillAmount == minDestAmount succeeds.
+    function test_FillConfirmedAtMinDestAmount() public {
+        bytes32 h = _lock();
+
+        bytes memory msgExact = abi.encodePacked(
+            V,
+            T_FILL_CONFIRMED,
+            h,
+            bytes32(uint256(uint160(solver))),
+            uint128(990_000), // exactly minDestAmount
+            uint64(12_345)
+        );
+        vm.expectEmit(true, true, false, true);
+        emit Released(h, solver, 100_000, 990_000, 12_345, 990_000);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msgExact);
+
+        assertEq(token.balanceOf(solver), 100_000);
     }
 
     // --- FillConfirmed amount field is informational -------------------------
@@ -1447,7 +1537,7 @@ contract PerihelionEscrowTest is Test {
         // Covered by existing test_RevertWhen_ReentrantLock; this is a
         // belt-and-suspenders confirmation that the 1/2 change didn't break it.
         bytes32 h = _lock();
-        (,, address asset, uint256 amount,,,) = escrow.locks(h);
+        (,, address asset, uint256 amount,,,,) = escrow.locks(h);
         assertEq(asset, address(token));
         assertGt(amount, 0);
     }
