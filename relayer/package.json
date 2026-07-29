@@ -1,6 +1,6 @@
 {
   "name": "@perihelion/relayer",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "LayerZero message relayer for the Perihelion Stellar <-> EVM path",
   "license": "MIT",
   "type": "module",
