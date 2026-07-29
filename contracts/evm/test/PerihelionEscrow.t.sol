@@ -205,6 +205,8 @@ contract MockEndpoint is ILayerZeroEndpoint {
     address public lastRefundAddress;
     uint256 public sendCount;
 
+    receive() external payable {}
+
     /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
     uint256 public mockFee;
 
@@ -831,14 +833,15 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
-    function test_PauseBlocksCancelExpired() public {
+    function test_CancelExpiredStillWorksWhilePaused() public {
         bytes32 h = _lock();
         escrow.setPaused(true);
 
         PerihelionEscrow.Intent memory intent = _intent();
         vm.warp(intent.deadline + escrow.confirmationGrace());
-        vm.expectRevert(PerihelionEscrow.EnforcedPause.selector);
         escrow.cancelExpired(h);
+
+        assertEq(token.balanceOf(user), 1_000_000);
     }
 
     /// @notice A pause must never strand in-flight funds: inbound settlement still

@@ -295,6 +295,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
+    event NativeSkimmed(address indexed to, uint256 amount);
     event MaxIntentAmountSet(uint256 maxAmount);
     event RollingWindowCapSet(uint256 duration, uint256 cap);
     event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
@@ -339,8 +340,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error PauseNotExpired();
     error ExceedsMaxIntentAmount();
     error RollingWindowCapExceeded();
-    error RollingWindowCapTriggered();
+    error RollingWindowCapAlreadyTriggered();
     error RollingWindowNotYetResettable();
+    error NativeTransferFailed();
     /// @dev skim() would draw into funds locked by active intents.
     error ExceedsSurplus();
     error AssetNotAllowed();
@@ -510,6 +512,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             revert RollingWindowNotYetResettable();
         }
         rollingWindowTriggered = false;
+        if (rollingWindowDuration > 0) {
+            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+            delete _rollingWindowBuckets[windowStart];
+        }
         _latestWindowStart = 0; // reset memoized window, forces recalc on next lock
         emit RollingWindowCapReset();
     }
@@ -563,6 +569,18 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (amount > surplus) revert ExceedsSurplus();
         _safeTransfer(token, to, amount);
         emit Skimmed(token, to, amount);
+    }
+
+    /// @notice Recover surplus native ETH held by the contract (e.g. from direct
+    ///         transfers or overpaid lock calls that were not refunded locally).
+    /// @param to Recipient address.
+    /// @param amount Amount of native ETH to transfer.
+    function skimNative(address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount > address(this).balance) revert ExceedsSurplus();
+        (bool ok,) = to.call{ value: amount }("");
+        if (!ok) revert NativeTransferFailed();
+        emit NativeSkimmed(to, amount);
     }
 
     // --- Lock ----------------------------------------------------------------
@@ -642,11 +660,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         bytes memory message = _encodeFillInstruction(intentHash, intent);
         MessagingParams memory params = _buildMessagingParams(message, msg.value);
         // Revert early on obvious underpayment rather than letting the endpoint
-        // bubble an opaque error. Any excess is refunded by the endpoint to
-        // msg.sender per the LayerZero V2 convention.
+        // bubble an opaque error. Only the quoted fee is actually sent to the
+        // endpoint; any excess is refunded locally to the caller.
         uint256 quoted = endpoint.quote(params, msg.sender).nativeFee;
         if (msg.value < quoted) revert FeeTooLow();
-        endpoint.send{ value: msg.value }(params, msg.sender);
+        uint256 refundAmount = msg.value - quoted;
+        endpoint.send{ value: quoted }(params, msg.sender);
+        if (refundAmount > 0) {
+            (bool ok,) = msg.sender.call{ value: refundAmount }("");
+            if (!ok) revert NativeTransferFailed();
+        }
     }
 
     // --- Value cap enforcement -----------------------------------------------
@@ -666,7 +689,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (rollingWindowDuration > 0 && rollingWindowCap > 0) {
             // Reject if cap has already been triggered.
             if (rollingWindowTriggered) {
-                revert RollingWindowCapTriggered();
+                revert RollingWindowCapAlreadyTriggered();
             }
 
             // Calculate current window start. Each window spans [windowStart, windowStart + duration).
@@ -726,6 +749,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             _onCancelIntent(message);
         } else {
             revert UnknownMessageType();
+        }
+        if (msg.value > 0) {
+            (bool ok,) = msg.sender.call{ value: msg.value }("");
+            if (!ok) revert NativeTransferFailed();
         }
     }
 
@@ -801,7 +828,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// transition wins (I1/I2). Shares reentrancy guard with other fund-moving paths.
     ///
     /// @param intentHash The keccak256 intent commitment identifying the lock.
-    function cancelExpired(bytes32 intentHash) external nonReentrant whenNotPaused {
+    function cancelExpired(bytes32 intentHash) external nonReentrant {
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
         if (l.released || l.refunded) revert AlreadyFinalized();
