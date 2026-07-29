@@ -29,9 +29,40 @@ pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Symbol, symbol_short};
 
 use messages::{encode_cancel_intent, encode_fill_confirmed};
+
+// =============================================================================
+// EVENT CONSTANTS (issue #341)
+// =============================================================================
+// All event names are compile-time constants to ensure consistency with the
+// event-shape spec, prevent typos, and enable compile-time checking. Names of
+// 9 characters or fewer use symbol_short!; longer names remain as Symbol::new
+// in runtime-evaluated const helpers.
+
+mod events {
+    use soroban_sdk::{symbol_short, Symbol};
+
+    pub const INITIALIZED: Symbol = symbol_short!("initialized");
+    pub const ENDPOINT_SET: Symbol = symbol_short!("endpoint_set");
+    pub const PEER_SET: Symbol = symbol_short!("peer_set");
+    pub const PEER_CHANGE_PROPOSED: Symbol = symbol_short!("peer_prop");
+    pub const PEER_CHANGE_CANCELLED: Symbol = symbol_short!("peer_cancel");
+    pub const ADMIN_TRANSFER_STARTED: Symbol = symbol_short!("adm_start");
+    pub const ADMIN_TRANSFER_COMPLETED: Symbol = symbol_short!("adm_complete");
+    pub const PAUSED_SET: Symbol = symbol_short!("paused_set");
+    pub const NATIVE_TOKEN_SET: Symbol = symbol_short!("native_tok");
+    pub const KEEPER_REWARD_SET: Symbol = symbol_short!("reward_set");
+    pub const KEEPER_REWARD_PAID: Symbol = symbol_short!("reward_pd");
+    pub const REGISTERED: Symbol = symbol_short!("registered");
+    pub const FILLED: Symbol = symbol_short!("filled");
+    pub const CONFIRMATION_SENT: Symbol = symbol_short!("confirmed");
+    pub const CANCELLED: Symbol = symbol_short!("cancelled");
+    pub const CANCELLED_INBOUND: Symbol = symbol_short!("canl_in");
+    pub const CANCEL_IGNORED: Symbol = symbol_short!("canl_ign");
+    pub const ROLLING_WINDOW_CAP_TRIGGERED: Symbol = symbol_short!("roll_cap");
+}
 
 // =============================================================================
 // EVENT SHAPE SPECIFICATION (issue #102)
@@ -40,7 +71,7 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 // Events are the off-chain integration surface for indexers, relayers, and
 // monitoring tooling. Each event shape below is a VERSIONED INTERFACE that must
 // be asserted by tests. Changes to event topics or payloads MUST be reflected
-// in both the constants below AND the corresponding EVM-side events.
+// in both the constants above AND the corresponding EVM-side events.
 //
 // EVM equivalence: See `contracts/evm/src/PerihelionEscrow.sol` for matching
 // event definitions. Cross-chain wire vectors in `contracts/shared/wire-vectors/`.
@@ -63,11 +94,14 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 // | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
 // | `cancelled`            | ("cancelled", intent_hash)       | (src_eid: u32, deadline: u64)                    |
 // | `cancelled_inbound`     | ("cancelled_inbound", intent_hash) | (src_eid: u32)                                  |
-// | `cancel_ignored`       | ("cancel_ignored", intent_hash)    | (status: IntentStatus)                           |
+// | `cancel_ignored`       | ("cancel_ignored", intent_hash)    | (status: u32)                           |
 
-/// Hard ceiling for TTL extension. Mirrors the representative network
-/// `max_entry_ttl`; clamp every extension to this. Should track network config.
-pub const MAX_TTL: u32 = 3_110_400;
+/// Default TTL ceiling for extensions (issue #340). Mirrors the representative
+/// network `max_entry_ttl`; operator must set_max_ttl if network value differs.
+/// 3110400 ledgers at ~5 s/ledger = ~180 days.
+pub const MAX_TTL_DEFAULT: u32 = 3_110_400;
+// Re-export for backwards compatibility and convenience.
+pub const MAX_TTL: u32 = MAX_TTL_DEFAULT;
 /// Extra TTL margin (~7 days at ~5s/ledger) beyond an intent's deadline, to
 /// absorb late confirmations and the refund window.
 const GRACE_LEDGERS: u32 = 120_960;
@@ -155,7 +189,7 @@ impl Perihelion {
         // Issue #16/#18: emit an event so deployment tooling and off-chain
         // monitors can confirm the configured roles without polling storage.
         env.events().publish(
-            (Symbol::new(&env, "initialized"),),
+            (events::INITIALIZED,),
             (admin, endpoint),
         );
         Ok(())
@@ -176,7 +210,7 @@ impl Perihelion {
             .instance()
             .set(&DataKey::Endpoint, &new_endpoint);
         env.events().publish(
-            (Symbol::new(&env, "endpoint_set"),),
+            (events::ENDPOINT_SET,),
             (old, new_endpoint),
         );
         Ok(())
@@ -208,7 +242,7 @@ impl Perihelion {
         env.storage().instance().set(&DataKey::PendingPeer(eid), &new_peer);
         env.storage().instance().set(&DataKey::PendingPeerTime(eid), &now);
         env.events().publish(
-            (Symbol::new(&env, "peer_change_proposed"),),
+            (events::PEER_CHANGE_PROPOSED,),
             (eid, old_peer, new_peer, ready_at),
         );
         Ok(())
@@ -262,7 +296,7 @@ impl Perihelion {
         env.storage().instance().remove(&DataKey::PendingPeerTime(eid));
 
         env.events().publish(
-            (Symbol::new(&env, "peer_set"),),
+            (events::PEER_SET,),
             (eid, old_peer, proposed_peer),
         );
         Ok(())
@@ -284,7 +318,7 @@ impl Perihelion {
             .remove(&DataKey::PendingPeerTime(eid));
 
         env.events().publish(
-            (Symbol::new(&env, "peer_change_cancelled"),),
+            (events::PEER_CHANGE_CANCELLED,),
             (eid,),
         );
         Ok(())
@@ -334,7 +368,7 @@ impl Perihelion {
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
         env.events().publish(
-            (Symbol::new(&env, "admin_transfer_started"),),
+            (events::ADMIN_TRANSFER_STARTED,),
             (current, new_admin),
         );
         Ok(())
@@ -358,7 +392,7 @@ impl Perihelion {
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.storage().instance().extend_ttl(17_280, 1_209_600);
         env.events().publish(
-            (Symbol::new(&env, "admin_transfer_completed"),),
+            (events::ADMIN_TRANSFER_COMPLETED,),
             (old, pending),
         );
         Ok(())
@@ -372,7 +406,7 @@ impl Perihelion {
         Self::require_admin(&env)?.require_auth();
         env.storage().instance().set(&DataKey::Paused, &paused);
         env.events().publish(
-            (Symbol::new(&env, "paused_set"),),
+            (events::PAUSED_SET,),
             (paused,),
         );
         Ok(())
@@ -420,7 +454,7 @@ impl Perihelion {
         }
         env.storage().instance().set(&DataKey::KeeperReward, &reward);
         env.events().publish(
-            (Symbol::new(&env, "keeper_reward_set"),),
+            (events::KEEPER_REWARD_SET,),
             (reward,),
         );
         Ok(())
@@ -516,7 +550,7 @@ impl Perihelion {
             .instance()
             .set(&DataKey::NativeToken, &native_token);
         env.events().publish(
-            (Symbol::new(&env, "native_token_set"),),
+            (events::NATIVE_TOKEN_SET,),
             (native_token,),
         );
         Ok(())
@@ -525,6 +559,28 @@ impl Perihelion {
     /// Get the native token address. Returns None if not yet configured.
     pub fn native_token(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::NativeToken)
+    }
+
+    /// Set the maximum TTL for storage entry extensions (issue #340). Admin-only.
+    /// Must be called if the network's max_entry_ttl differs from MAX_TTL_DEFAULT.
+    /// All TTL extensions are clamped to this value; setting it too low can cause
+    /// archival failures if the network value is higher. Setting it to 0 disables
+    /// this check (not recommended). Typical value: 3110400 for mainnet/testnet.
+    pub fn set_max_ttl(env: Env, max_ttl: u32) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if max_ttl == 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::MaxTtl, &max_ttl);
+        Ok(())
+    }
+
+    /// Get the configured maximum TTL, or the default if not set.
+    pub fn get_max_ttl(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxTtl)
+            .unwrap_or(MAX_TTL_DEFAULT)
     }
 
     // --- LayerZero inbound -----------------------------------------------------
@@ -574,22 +630,17 @@ impl Perihelion {
 
     // --- Solver fill -----------------------------------------------------------
 
-    /// Solver delivers `dest_asset` to the intent recipient from its own inventory,
-    /// records the fill, and durably marks the intent `Filled`. Does NOT dispatch the
-    /// cross-chain FillConfirmed message; call `dispatch_confirmation` separately.
-    /// This separation makes the messaging leg independently retriable (Issue #12).
-    pub fn deliver_intent(
-        env: Env,
-        solver: Address,
-        solver_evm: BytesN<32>,
-        intent_hash: BytesN<32>,
+    /// Validate fill inputs and stage the intent record for filling (issue #338).
+    /// Returns the data key and the mutated record ready for commitment.
+    /// This is the canonical validation point shared by both fill entrypoints.
+    fn validate_and_stage_fill(
+        env: &Env,
+        solver: &Address,
+        intent_hash: &BytesN<32>,
         fill_amount: i128,
-    ) -> Result<(), PerihelionError> {
-        solver.require_auth();
-        Self::require_not_paused(&env)?;
-
+    ) -> Result<(DataKey, IntentRecord), PerihelionError> {
         // Terminal-state guard via cheap markers (survives record archival).
-        if Self::is_finalized(&env, &intent_hash) {
+        if Self::is_finalized(env, intent_hash) {
             return Err(PerihelionError::IntentFinalized);
         }
 
@@ -611,7 +662,7 @@ impl Perihelion {
             return Err(PerihelionError::IntentExpired);
         }
         if let Some(ref pref) = rec.preferred_solver {
-            if pref != &solver && now < rec.reservation_expires {
+            if pref != solver && now < rec.reservation_expires {
                 return Err(PerihelionError::ReservedForSolver);
             }
         }
@@ -621,6 +672,25 @@ impl Perihelion {
         if fill_amount < rec.min_dest_amount {
             return Err(PerihelionError::InsufficientFillAmount);
         }
+
+        Ok((key, rec))
+    }
+
+    /// Solver delivers `dest_asset` to the intent recipient from its own inventory,
+    /// records the fill, and durably marks the intent `Filled`. Does NOT dispatch the
+    /// cross-chain FillConfirmed message; call `dispatch_confirmation` separately.
+    /// This separation makes the messaging leg independently retriable (Issue #12).
+    pub fn deliver_intent(
+        env: Env,
+        solver: Address,
+        solver_evm: BytesN<32>,
+        intent_hash: BytesN<32>,
+        fill_amount: i128,
+    ) -> Result<(), PerihelionError> {
+        solver.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let (key, mut rec) = Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
 
         // Effects before interactions: flip status, write the settled marker.
         rec.status = IntentStatus::Filled;
@@ -651,7 +721,7 @@ impl Perihelion {
         env.storage().instance().extend_ttl(17_280, 1_209_600);
 
         env.events().publish(
-            (Symbol::new(&env, "filled"), intent_hash),
+            (events::FILLED, intent_hash),
             (solver, rec.dest_asset, fill_amount, rec.src_eid),
         );
         Ok(())
@@ -722,7 +792,7 @@ impl Perihelion {
         Self::update_solver_reputation(&env, &solver, fill_latency)?;
 
         env.events().publish(
-            (Symbol::new(&env, "confirmation_sent"), intent_hash),
+            (events::CONFIRMATION_SENT, intent_hash),
             (solver,),
         );
         Ok(())
@@ -743,39 +813,7 @@ impl Perihelion {
         solver.require_auth();
         Self::require_not_paused(&env)?;
 
-        // Terminal-state guard via cheap markers (survives record archival).
-        if Self::is_finalized(&env, &intent_hash) {
-            return Err(PerihelionError::IntentFinalized);
-        }
-
-        let key = DataKey::Intent(intent_hash.clone());
-        let mut rec: IntentRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(PerihelionError::IntentNotFound)?;
-
-        if rec.status != IntentStatus::Locked {
-            return Err(PerihelionError::AlreadyFilled);
-        }
-        let now = env.ledger().timestamp();
-        if now >= rec.deadline {
-            return Err(PerihelionError::IntentExpired);
-        }
-        if now + MAX_DISPATCH_WINDOW > rec.deadline {
-            return Err(PerihelionError::IntentExpired);
-        }
-        if let Some(ref pref) = rec.preferred_solver {
-            if pref != &solver && now < rec.reservation_expires {
-                return Err(PerihelionError::ReservedForSolver);
-            }
-        }
-        if fill_amount <= 0 {
-            return Err(PerihelionError::InvalidAmount);
-        }
-        if fill_amount < rec.min_dest_amount {
-            return Err(PerihelionError::InsufficientFillAmount);
-        }
+        let (key, mut rec) = Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
 
         // Idempotency marker written before the outbound dispatch.
         env.storage()
@@ -829,7 +867,7 @@ impl Perihelion {
         env.storage().instance().extend_ttl(17_280, 1_209_600);
 
         env.events().publish(
-            (Symbol::new(&env, "filled"), intent_hash),
+            (events::FILLED, intent_hash),
             (solver, rec.dest_asset, fill_amount, rec.src_eid),
         );
         Ok(())
@@ -933,7 +971,7 @@ impl Perihelion {
                 );
                 // Emit an observable event for the reward payout. Issue #173.
                 env.events().publish(
-                    (Symbol::new(&env, "keeper_reward_paid"), intent_hash.clone()),
+                    (events::KEEPER_REWARD_PAID, intent_hash.clone()),
                     (caller.clone(), keeper_reward),
                 );
             }
@@ -944,7 +982,7 @@ impl Perihelion {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "cancelled"), intent_hash),
+            (events::CANCELLED, intent_hash),
             (rec.src_eid, rec.deadline),
         );
         Ok(())
@@ -1291,7 +1329,7 @@ impl Perihelion {
                                 &now.checked_add(duration).ok_or(PerihelionError::ArithmeticError)?,
                             );
                             env.events().publish(
-                                (Symbol::new(env, "rolling_window_cap_triggered"),),
+                                (events::ROLLING_WINDOW_CAP_TRIGGERED,),
                                 (window_start, accumulated),
                             );
                             return Err(PerihelionError::RollingWindowCapExceeded);
@@ -1391,7 +1429,7 @@ impl Perihelion {
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
 
         env.events().publish(
-            (Symbol::new(env, "registered"), fi.intent_hash),
+            (events::REGISTERED, fi.intent_hash),
             (transport_src_eid, fi.deadline),
         );
         Ok(())
@@ -1401,9 +1439,14 @@ impl Perihelion {
         if Self::is_finalized(env, &ci.intent_hash) {
             // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
             // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
+            let observed = if env.storage().persistent().has(&DataKey::Cancelled(ci.intent_hash.clone())) {
+                IntentStatus::Cancelled
+            } else {
+                IntentStatus::ConfirmationSent
+            };
             env.events().publish(
-                (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
-                (IntentStatus::ConfirmationSent as u32,),
+                (events::CANCEL_IGNORED, ci.intent_hash.clone()),
+                (observed as u32,),
             );
             return Ok(());
         }
@@ -1425,14 +1468,14 @@ impl Perihelion {
                     MAX_TTL,
                 );
                 env.events().publish(
-                    (Symbol::new(env, "cancelled_inbound"), ci.intent_hash.clone()),
+                    (events::CANCELLED_INBOUND, ci.intent_hash.clone()),
                     (rec.src_eid,),
                 );
             } else {
                 // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
                 // Emit cancel_ignored event to record the race.
                 env.events().publish(
-                    (Symbol::new(env, "cancel_ignored"), ci.intent_hash.clone()),
+                    (events::CANCEL_IGNORED, ci.intent_hash.clone()),
                     (rec.status as u32,),
                 );
             }
