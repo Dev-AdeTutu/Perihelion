@@ -6,6 +6,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
+      - '.spectral.yaml'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - '.github/workflows/docs.yml'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
+      - '.spectral.yaml'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - '.github/workflows/docs.yml'
@@ -23,6 +25,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  openapi-lint:
+    name: Lint mempool OpenAPI spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Lint docs/api/mempool-api.yaml with Spectral
+        run: npx --yes @stoplight/spectral-cli lint docs/api/mempool-api.yaml
+
   validate-templates:
     name: Validate issue/PR templates
     runs-on: ubuntu-latest

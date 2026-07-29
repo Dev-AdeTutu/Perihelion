@@ -69,6 +69,8 @@ export class MempoolServer {
   private store = new IntentStore();
   private port: number;
   private host: string;
+  private chainId: number;
+  private verifyingContract: Address;
   private domain: ReturnType<typeof perihelionDomain>;
   private server?: Server;
   private rateLimitHits = new Map<string, number[]>();
@@ -86,7 +88,9 @@ export class MempoolServer {
     }
     this.port = opts.port ?? 3000;
     this.host = opts.host ?? "localhost";
-    this.domain = perihelionDomain(opts.chainId, opts.verifyingContract);
+    this.chainId = opts.chainId;
+    this.verifyingContract = opts.verifyingContract;
+    this.domain = perihelionDomain(this.chainId, this.verifyingContract);
     this.statusToken = opts.statusToken;
     this.setupRoutes();
   }
@@ -130,10 +134,6 @@ export class MempoolServer {
     }
 
     res.json(this.store.get(hash as Hex));
-  }
-
-  private handleInfo(_req: Request, res: Response): void {
-    res.json({ chainId: this.domain.chainId, verifyingContract: this.domain.verifyingContract });
   }
 
   /** Rejects an IP once it exceeds a fixed request budget within a sliding window. */
@@ -255,12 +255,29 @@ export class MempoolServer {
       ? Math.min(limitParam, MAX_LIST_LIMIT)
       : DEFAULT_LIST_LIMIT;
 
-    const records = this.store.all(status);
+    let records = this.store.all(status);
+
+    // Optional source-chain filter, applied before pagination.
+    const chainId = req.query.chainId;
+    if (chainId !== undefined) {
+      const chainIdNum = Number(chainId);
+      records = records.filter((r) => r.intent.sourceChainId === chainIdNum);
+    }
+
     const startIndex = cursor ? records.findIndex((r) => r.hash === cursor) + 1 : 0;
     const page = records.slice(startIndex, startIndex + limit);
     const nextCursor = startIndex + limit < records.length ? page[page.length - 1]?.hash : undefined;
 
     res.json({ records: page, nextCursor });
+  }
+
+  private handleInfo(_req: Request, res: Response): void {
+    res.json({
+      name: this.domain.name,
+      version: this.domain.version,
+      chainId: this.chainId,
+      verifyingContract: this.verifyingContract,
+    });
   }
 
   start(): Promise<void> {
