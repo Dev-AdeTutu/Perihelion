@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use soroban_sdk::contracterror;
 
 /// Contract error codes, assigned in HTTP-analogue bands for fast triage:

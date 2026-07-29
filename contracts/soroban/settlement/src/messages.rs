@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 //! LayerZero payload encoding and decoding.
 //!
 //! Perihelion sends two message types from Stellar to the source chain:

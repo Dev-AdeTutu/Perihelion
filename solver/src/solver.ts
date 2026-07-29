@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * The Perihelion solver loop: poll the mempool for pending intents, evaluate
  * each for profitability, and execute fills for the winners.

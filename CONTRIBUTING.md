@@ -262,6 +262,39 @@ forge doc --out /tmp/natspec-out
 
 Generated documentation is uploaded as the `natspec-docs` artifact on every CI run.
 
+## License headers
+
+All Solidity contracts (`contracts/evm/**/*.sol`) start with
+`// SPDX-License-Identifier: MIT` as their first line. The same convention
+applies to every other source file in the repo:
+
+- **TypeScript** — every `.ts` file under `sdk/`, `relayer/`, `solver/`,
+  `mempool/` (both `src/` and `test/`), and the root `test/` e2e suite must
+  start with:
+
+  ```ts
+  // SPDX-License-Identifier: MIT
+  ```
+
+  If the file has a shebang (`#!/usr/bin/env node`), the SPDX line goes
+  immediately after it, followed by a blank line before the rest of the file.
+  Otherwise it is line 1, followed by a blank line (even before a leading
+  JSDoc block or `import`).
+
+- **Rust** — every `.rs` file under `contracts/soroban/**/src` must start
+  with the same `// SPDX-License-Identifier: MIT` line, above `#![no_std]`,
+  `#![cfg(test)]`, or any other content.
+
+New source files must include the header. CI enforces this on every PR via
+`scripts/check-spdx-headers.sh` (wired into the `typescript` job in
+`ci.yml` and the `soroban` job in `soroban.yml`), which checks every file
+tracked by git and fails the build if any TypeScript or Rust source file is
+missing the header. Run it locally with:
+
+```bash
+./scripts/check-spdx-headers.sh
+```
+
 ## Checking docs locally
 
 Two lightweight CI checks run on every PR that touches docs or templates:

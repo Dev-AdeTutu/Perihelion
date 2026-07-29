@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Validators for Stellar addresses and asset identifiers.
  *

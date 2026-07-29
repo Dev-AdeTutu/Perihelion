@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 //! Interface to the LayerZero endpoint contract.
 //!
 //! This is a minimal, swappable abstraction over the LayerZero V2 endpoint's

@@ -3,10 +3,10 @@ name: Soroban
 on:
   push:
     branches: [main]
-    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml"]
+    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml", "scripts/check-spdx-headers.sh"]
   pull_request:
     branches: [main]
-    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml"]
+    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml", "scripts/check-spdx-headers.sh"]
 
 concurrency:
   group: soroban-${{ github.ref }}
@@ -21,6 +21,10 @@ jobs:
         working-directory: contracts/soroban
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check SPDX license headers
+        working-directory: .
+        run: ./scripts/check-spdx-headers.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

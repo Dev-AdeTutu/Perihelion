@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Runtime validation for `IntentRecord`/`SignedIntent` JSON received from the
  * mempool. A TypeScript `as` cast is compile-time only — the mempool is an

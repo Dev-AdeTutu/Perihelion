@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Executor: orchestrates the two settlement legs of a fill.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Inventory management for the reference solver.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Load executor configuration from environment variables. */
 
 import type { ExecutorConfig } from "./executor.js";

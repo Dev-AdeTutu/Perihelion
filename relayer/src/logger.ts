@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Structured JSON logger for the Perihelion relayer.
  *

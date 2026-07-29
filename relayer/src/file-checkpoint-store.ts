@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Default file-backed {@link CheckpointStore}. */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";

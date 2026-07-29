@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Tests for the HealthServer (Issue 2).
  *

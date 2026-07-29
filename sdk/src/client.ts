@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Client for submitting intents to a Perihelion mempool and tracking status.
  *

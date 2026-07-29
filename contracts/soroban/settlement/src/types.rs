@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use soroban_sdk::{contracttype, Address, Bytes, BytesN};
 
 /// Wire protocol version for all LayerZero payloads.

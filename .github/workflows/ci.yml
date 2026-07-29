@@ -32,6 +32,7 @@ on:
       - ".nvmrc"
       - "tsconfig.base.json"
       - ".github/workflows/ci.yml"
+      - "scripts/check-spdx-headers.sh"
       - "docs/**"
       - "*.md"
   pull_request:
@@ -46,6 +47,7 @@ on:
       - ".nvmrc"
       - "tsconfig.base.json"
       - ".github/workflows/ci.yml"
+      - "scripts/check-spdx-headers.sh"
       - "docs/**"
       - "*.md"
 
@@ -79,6 +81,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check SPDX license headers
+        run: ./scripts/check-spdx-headers.sh
 
       - name: Build all packages
         run: make build-ts

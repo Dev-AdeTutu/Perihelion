@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Signature test-vector conformance for the TypeScript verifier (verifyIntent).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Persists the relayer's cursor across restarts.
  *

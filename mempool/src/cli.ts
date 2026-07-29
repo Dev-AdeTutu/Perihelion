@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { MempoolServer } from "./index.js";
 import type { Address } from "@perihelion/sdk";
 

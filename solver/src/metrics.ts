@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * P&L and operational metrics for the reference solver.
  *

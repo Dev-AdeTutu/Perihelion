@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Lightweight HTTP health/readiness/metrics server for the Perihelion relayer.
  *

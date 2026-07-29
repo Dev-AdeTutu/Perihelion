@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Decimal-aware unit helpers for Perihelion intent amounts.
  *

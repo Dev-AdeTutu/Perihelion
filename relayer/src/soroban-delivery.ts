@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Soroban destination delivery: submits verified LayerZero messages to the
  * Stellar settlement contract, restoring archived entries as needed.

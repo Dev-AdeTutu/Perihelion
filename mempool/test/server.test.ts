@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Tests for the mempool server's EIP-712 domain binding. The server verifies
  * intent signatures against a domain built from its configured chainId and

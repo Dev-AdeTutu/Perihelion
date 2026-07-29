@@ -16,7 +16,7 @@
   },
   "homepage": "https://github.com/Perihelion-Protocol/Perihelion",
   "bugs": "https://github.com/Perihelion-Protocol/Perihelion/issues",
-  "files": ["dist"],
+  "files": ["dist", "LICENSE"],
   "scripts": {
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 //! Differential fuzzing for the Soroban message encoder.
 //!
 //! Uses proptest to generate random structured messages and validate:

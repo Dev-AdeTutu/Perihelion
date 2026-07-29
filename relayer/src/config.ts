@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Relayer runtime configuration, loaded from environment variables. */
 
 export interface RelayerConfig {

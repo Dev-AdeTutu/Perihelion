@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * EVM source watcher: polls the EVM escrow for `Locked` events and decodes
  * each into a `PendingMessage` for relay to the Soroban settlement contract.

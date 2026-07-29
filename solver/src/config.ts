@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /** Solver runtime configuration, loaded from environment variables. */
 
 import { isAddress, type Address } from "viem";
