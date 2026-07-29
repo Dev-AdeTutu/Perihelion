@@ -1580,20 +1580,24 @@ path — there is no `sweep`/`drain` function — so even a fully compromised ad
 cannot directly steal locked user funds; the worst case is a denial-of-service
 (pause) bounded by the decentralization roadmap (§8).
 
-*Cancellation trust model (deliberate, 1-of-N).* `PerihelionTimelock.cancel` is
-callable by any single owner, not just the proposer or a threshold — an
-intentional asymmetry with confirm/execute, which require `threshold`. This is a
-cheap liveness valve: any owner can clear a stuck or contested operation without
-assembling the same threshold that confirmed it. The acknowledged cost is a
-griefing vector — one dissenting owner can repeatedly cancel an operation the
-rest of the multisig supports, indefinitely stalling that specific action (cancel
-is O(1); re-proposing is equally cheap, so this is a stalemate, not a one-sided
-veto). It does **not** allow denial-of-service against the multisig's ability to
-act in general, and it cannot move or freeze funds — the worst case is delayed
-governance, not loss. Threshold-to-cancel and proposer-only alternatives were
-considered and rejected: both trade away the liveness valve without removing
-the need for owners to coordinate on what should run, which is a process
-concern outside the contract's scope.
+*Cancellation trust model (symmetric with execution, issue #282 / #44).*
+`PerihelionTimelock.cancel` now requires the same `threshold` confirmations as
+execution. Each owner calls `cancel(id)` to submit a cancel-confirmation; only
+once `threshold` cancel-confirmations have accumulated is the operation deleted
+and `Cancelled` emitted. Cancel-confirmations are tracked independently of
+exec-confirmations in `cancelConfirmations[id]` and `cancelConfirmedBy[id][owner]`.
+
+This closes the asymmetric-security defect described in issue #44: in an M-of-N
+multisig, a single compromised owner key can no longer block all governance
+indefinitely by cancelling every proposal before it reaches `execute`. The
+worst-case impact of one compromised key is now the same on both paths — the
+attacker can confirm or cancel-confirm, but cannot cross the threshold alone.
+
+An owner who merely disagrees with a queued proposal should call
+`revokeConfirmation`, which withdraws their exec-confirmation and resets the
+timelock if it drops below threshold. That remains a single-owner primitive,
+preserving liveness for honest "I changed my mind" corrections without granting
+veto power to any individual.
 
 ---
 
