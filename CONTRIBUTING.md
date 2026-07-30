@@ -183,6 +183,29 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
     changeset/release-please automation — all packages move together until
     a package reaches 1.0 and needs its own release cadence.
 
+### Keeping the Implementation Status table honest
+
+The README's [Implementation Status](./README.md#implementation-status) table is
+what a reader (and a security reviewer) uses to decide what is real. A PR that
+changes whether a component is a stub, partially implemented, or complete must
+update the corresponding row in the same PR.
+
+Two rules the table has to keep:
+
+- Every row describes the code at `HEAD`, in both directions. Overstating a stub
+  misleads users; understating a real implementation means reviewers skip code
+  that is live.
+- Rows link only to **open** issues. If a closed issue is still the best
+  reference, annotate it: `#5 (closed, superseded by #328)`. The
+  `status-table-links` job in `.github/workflows/docs.yml` fails on an
+  unannotated closed link.
+
+Check it locally with:
+
+```bash
+node scripts/check-status-links.mjs
+```
+
 ## Merge criteria
 
 - All CI checks pass.

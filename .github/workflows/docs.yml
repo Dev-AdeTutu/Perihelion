@@ -10,6 +10,7 @@ on:
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - '.github/workflows/docs.yml'
+      - 'scripts/check-status-links.mjs'
   pull_request:
     branches: [main]
     paths:
@@ -19,6 +20,7 @@ on:
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - '.github/workflows/docs.yml'
+      - 'scripts/check-status-links.mjs'
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -94,6 +96,23 @@ jobs:
           else:
               print(f"All {len(list(template_dir.glob('*.yml')))} YAML templates are valid.")
           EOF
+
+  status-table-links:
+    name: Implementation Status links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Needs the API to resolve issue state, so it runs with the default token.
+      - name: Check the table links no closed issues
+        run: node scripts/check-status-links.mjs README.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   markdown-links:
     name: Markdown link check

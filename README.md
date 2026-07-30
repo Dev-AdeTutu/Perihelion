@@ -343,18 +343,22 @@ discussions to the first lines of contract code.
 
 ## Implementation Status
 
-The following components are currently **mocked, stubbed, or pending** and should
-not be assumed to have live, production-ready implementations:
+Status of each component as of `HEAD`. Rows are written against the code, not
+against the roadmap: read a row as a claim about what the code does today. CI
+fails if a row here links to a closed issue (`scripts/check-status-links.mjs`).
 
 | Component | Status | Details |
 | --- | --- | --- |
 | **LayerZero Endpoint (Soroban)** | Interface + Mock | `contracts/soroban/settlement/src/endpoint.rs` defines the `LzEndpoint` trait as a minimal, swappable abstraction. During this phase, a mock contract implements this surface; the real endpoint (or a thin adapter) will implement the same signature once the Soroban LayerZero stack is GA. The Soroban side does not yet communicate with a live LayerZero endpoint. |
-| **Inbound FillInstruction Codec** | Pending | The codec for deserializing `FillInstruction` messages from LayerZero is a typed stub. Full implementation is deferred pending finalization of the cross-chain message format (see [issue #2](https://github.com/Perihelion-Protocol/Perihelion/issues/2)). |
-| **Relayer Watcher & Delivery** | Stubs | The `relayer/` module's message watcher and delivery components are currently stubbed out for local testing. Production relayer implementations are still in development. |
-| **Solver Executor** | Unimplemented | The solver executor (`solver/`) is not yet implemented. See [issue #5](https://github.com/Perihelion-Protocol/Perihelion/issues/5). |
-| **Value Caps / Circuit Breaker** | Pending | Protocol-wide value caps and circuit-breaker controls are under development (see [issue #145](https://github.com/Perihelion-Protocol/Perihelion/issues/145)). Currently there are no per-intent maximum locks or rolling-window throughput limits. |
+| **Inbound FillInstruction Codec** | Implemented, wire format under revision | `messages.rs` decodes `FillInstruction`, `CancelIntent`, and confirmation payloads from LayerZero bytes. The wire format is not frozen: field widths and address encoding are still being revised, so a decoder built against it today may need updating. |
+| **Relayer EVM Watcher** | Implemented | `relayer/src/evm-watcher.ts` polls source-chain logs through viem with bounded block ranges and concurrent transaction fetches. |
+| **Relayer Soroban Delivery** | Implemented, archived-entry restore incomplete | `relayer/src/soroban-delivery.ts` builds, simulates, and submits `lz_receive` calls against the settlement contract. Archived ledger entries are detected but the `RestoreFootprint` operation is not yet constructed from the simulation footprint, so delivery to an archived contract still fails. Tracked by the `TODO(#303)` in that file; [#303](https://github.com/Perihelion-Protocol/Perihelion/issues/303) is closed, no successor filed yet. |
+| **Solver Executor** | Stub | `solver/src/executor.ts` implements the orchestration flow, but `lockOnEvm`, `fillOnSoroban`, and `isSettled` all throw `Executor not implemented`. No solver can execute an intent end to end. |
+| **Value Caps / Circuit Breaker** | Implemented (rolling window only) | Rolling-window value caps and a latching breaker exist on both chains: `PerihelionEscrow.sol` (`rollingWindowCap`, `rollingWindowTriggered`, `resetRollingWindow`) and `lib.rs` (`set_rolling_window_cap`, `reset_rolling_window_cap`). Once tripped, the breaker stays tripped until an admin resets it. There is still **no per-intent maximum lock**: a single intent of any size passes as long as the window cap is not exceeded. |
+| **SDK Deployment Addresses** | Placeholder | `sdk/src/deployments.ts` ships placeholder addresses. The SDK cannot target a live deployment until they are filled in. |
 
-This section is maintained as features land. For an exhaustive implementation
+This section is maintained as features land, and a PR that changes a component's
+status is expected to update the affected row. For an exhaustive implementation
 roadmap, see the [phased rollout](./docs/TECHNICAL-ARCHITECTURE.md#8-phased-rollout)
 section of the Technical Architecture.
 
