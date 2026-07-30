@@ -19,13 +19,44 @@ Perihelion keeps dependency updates and security triage explicit so that the bri
 
 ## Vulnerability triage
 
-- CI runs an npm audit job and a Rust advisory scan job on pushes, pull requests, and a weekly schedule.
+- CI runs an npm audit job and a `cargo deny` job on pushes, pull requests, and a weekly schedule. The Rust job checks `advisories`, `licenses`, `bans`, and `sources` against [deny.toml](../deny.toml), so an unpatched advisory, an incompatible licence, a wildcard version requirement, or a dependency from an unknown registry or git source each fail the build.
 - The workflow fails on high and critical advisories unless they are explicitly allowlisted in [.github/dependency-audit-allowlist.json](../.github/dependency-audit-allowlist.json) for the npm side and in [deny.toml](../deny.toml) for the Rust side.
 - Any allowlisted advisory must include a short rationale and an expiry date in the corresponding file so the exception does not become permanent.
+
+## Rust dependency policy
+
+The policy lives in [deny.toml](../deny.toml) and applies to the Soroban workspace.
+
+- **Licences.** Only permissive licences are allowed: MIT, Apache-2.0 (including the
+  LLVM-exception variant), BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Unlicense, and Zlib.
+  Perihelion ships under MIT, so a copyleft dependency (GPL, AGPL, MPL) is a licence
+  incompatibility and is rejected rather than warned about.
+- **Advisories.** `yanked = "deny"`. Any RustSec advisory fails the job.
+- **Bans.** Wildcard version requirements are denied. Duplicate versions of a crate warn rather
+  than fail, because the fix usually sits in a transitive dependency, but they are tracked:
+  duplicates inflate the wasm artefact and Soroban caps contract size.
+- **Sources.** Unknown registries and git sources are denied, so every crate comes from
+  crates.io.
+
+### Exception process
+
+1. Open an issue describing the advisory or licence and why the dependency cannot be replaced.
+2. Add the entry to the relevant section of `deny.toml` with an inline comment giving the
+   rationale, the issue link, and an expiry date.
+3. An exception is a temporary measure. Reviewing expired entries is part of the release
+   checklist, and an entry past its expiry is treated as a build failure to be fixed, not
+   extended by default.
+
+Run the same checks locally before pushing:
+
+```bash
+make audit          # all three ecosystems
+make audit-rust     # cargo-deny only
+```
 
 ## Maintenance checklist
 
 1. Update dependency manifests.
 2. Regenerate the relevant lockfiles.
-3. Re-run the security scan locally and in CI.
+3. Re-run the security scans locally (`make audit`) and in CI.
 4. Document any allowlisted exception with rationale and expiry.

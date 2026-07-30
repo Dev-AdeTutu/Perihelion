@@ -77,6 +77,5 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
 
-      - name: Run cargo-deny advisories scan
-        run: cargo deny check advisories
-        working-directory: contracts/soroban
+      - name: Run cargo-deny (advisories, licences, bans, sources)
+        run: cargo deny --manifest-path contracts/soroban/Cargo.toml --config deny.toml check advisories licenses bans sources
