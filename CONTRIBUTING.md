@@ -206,6 +206,52 @@ Check it locally with:
 node scripts/check-status-links.mjs
 ```
 
+## Definition of Done
+
+An issue is closed when the behaviour it describes is in the code and enforced,
+not when an artefact related to it exists. A config file, a snapshot, or a
+baseline JSON that no job reads is worse than nothing: it reads as a guarantee
+and provides none.
+
+Before closing an issue, all three must hold:
+
+1. **Implemented.** The described behaviour is in the code at `HEAD`, not in a
+   placeholder, a `TODO`, or a method that throws `not implemented`.
+2. **Asserted.** A test fails if the behaviour regresses.
+3. **Gating, for CI and tooling issues.** The check fails on a deliberately
+   broken input, and that negative case runs in CI. Adding a config file or a
+   baseline is not enough; a job has to read it and fail.
+
+The closing PR states which of the three it satisfies, and closes the issue with
+`Closes #N` in its description rather than the issue being closed by hand. That
+keeps a diff attached to every closure, so a later reader can check the claim
+instead of trusting it.
+
+### Negative tests for CI gates
+
+Every gating check gets a companion case proving it gates, checked in next to
+the check itself:
+
+| Gate | Proof it gates |
+| ---- | -------------- |
+| `scripts/check-status-links.mjs` | `.github/fixtures/status-table-closed-issue.md` links a closed issue; the `status-table-links` job asserts the checker exits non-zero on it. |
+| `scripts/check-toolchain.sh` | Fails when `rustc` or `forge` is not the pinned version; every Rust and Foundry job runs it before building. |
+
+When you add a gate, add its negative case in the same PR. A gate that has never
+been observed to fail is an assumption, not a guarantee.
+
+### Tracking gaps that are already in the code
+
+`.github/workflows/stub-audit.yml` runs weekly and lists every `TODO`,
+`Placeholder`, `not implemented`, and `stub` marker under the source directories
+in its job summary. Treat that list as the authoritative gap list: it is derived
+from the code, so closing an issue cannot hide an entry. Run the same scan
+locally with:
+
+```bash
+grep -rInE 'TODO|FIXME|[Pp]laceholder|[Nn]ot implemented|\bstubs?\b' sdk/src solver/src relayer/src mempool/src
+```
+
 ## Merge criteria
 
 - All CI checks pass.

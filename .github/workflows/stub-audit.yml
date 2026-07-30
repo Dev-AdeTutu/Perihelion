@@ -1,0 +1,67 @@
+name: Stub audit
+
+# Implementation gaps stop being visible once the issue that described them is
+# closed. This job re-derives them from the code every week so the gap list is
+# always a fact about HEAD, never a claim in a tracker.
+
+on:
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stub-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Report remaining stubs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan source directories for stub markers
+        run: |
+          set -uo pipefail
+
+          PATTERN='TODO|FIXME|[Pp]laceholder|[Nn]ot implemented|[Uu]nimplemented|\bstubs?\b'
+          ROOTS='sdk/src solver/src relayer/src mempool/src contracts/evm/src contracts/soroban/settlement/src scripts'
+
+          {
+            echo "# Stub audit"
+            echo
+            echo "Markers found in source at \`${GITHUB_SHA:0:7}\`."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          TOTAL=0
+          for root in $ROOTS; do
+            [ -d "$root" ] || continue
+            hits=$(grep -rInE "$PATTERN" "$root" || true)
+            count=$(printf '%s' "$hits" | grep -c . || true)
+            TOTAL=$((TOTAL + count))
+
+            [ "$count" -eq 0 ] && continue
+
+            {
+              echo "## $root ($count)"
+              echo
+              echo '```'
+              printf '%s\n' "$hits"
+              echo '```'
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          {
+            echo "**Total: $TOTAL marker(s).**"
+            echo
+            echo "Each marker is either tracked by an open issue or is a gap nobody is"
+            echo "tracking. If it is the second, file it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "stub-audit: $TOTAL marker(s) across source directories"
