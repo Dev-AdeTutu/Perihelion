@@ -56,6 +56,21 @@ jobs:
         working-directory: .
         run: make build-soroban
 
+      - name: Wasm size check
+        run: |
+          WASM=$(find target/wasm32-unknown-unknown/release -maxdepth 1 -name 'perihelion_settlement.wasm' | head -1)
+          if [ -z "$WASM" ]; then
+            echo "::error::release wasm not found — cannot enforce the size budget"
+            exit 1
+          fi
+          BUDGET=$(jq -r '.max_wasm_size_bytes' settlement/ci/resource-baselines.json)
+          SIZE=$(stat -c%s "$WASM")
+          echo "wasm size: $SIZE bytes (budget $BUDGET)"
+          if [ "$SIZE" -gt "$BUDGET" ]; then
+            echo "::error::wasm size $SIZE exceeds the budget of $BUDGET bytes in settlement/ci/resource-baselines.json"
+            exit 1
+          fi
+
   # Required gate for branch protection on the Soroban workflow.
   # Passes when the soroban job succeeds or is skipped; fails if it fails/cancels.
   check:

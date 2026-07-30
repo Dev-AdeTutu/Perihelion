@@ -6,6 +6,10 @@ solc = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 evm_version = "cancun"
+# Metadata hashes embed the source path and compiler build, which makes bytecode
+# non-deterministic across machines; dropping them lets CI pin exact hashes.
+bytecode_hash = "none"
+cbor_metadata = false
 # Read access to the shared cross-chain wire-format conformance vectors.
 fs_permissions = [{ access = "read", path = "../shared" }]
 # Gas snapshots: fail CI if gas costs increase beyond tolerance

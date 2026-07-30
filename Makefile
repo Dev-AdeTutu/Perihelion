@@ -21,7 +21,8 @@
         fmt   fmt-ts   fmt-soroban   fmt-evm   \
         coverage coverage-ts coverage-evm      \
         gas                                    \
-        audit audit-ts audit-evm               \
+        audit audit-ts audit-evm audit-rust    \
+        bytecode-check                         \
         clean                                  \
         fuzz fuzz-bounded fuzz-extended fuzz-nightly \
         fuzz-evm fuzz-rust fuzz-cross          \
@@ -230,11 +231,27 @@ gas: ## Print EVM gas report (forge test --gas-report)
 # AUDIT / SECURITY HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-audit: audit-ts audit-evm ## Run all security audit helpers
+audit: audit-ts audit-evm audit-rust ## Run all security audit helpers
 
 audit-ts: ## npm audit for TypeScript packages
 	@echo "▶ audit-ts"
 	npm audit
+
+bytecode-check: ## Verify the EVM build matches contracts/evm/.pinned-bytecode/ (pass ARGS=--update to re-pin)
+	@echo "▶ bytecode-check"
+	@if command -v forge >/dev/null 2>&1; then \
+		./scripts/check-pinned-bytecode.sh $(ARGS); \
+	else \
+		echo "⏭ skipping bytecode-check — forge not installed (install: https://getfoundry.sh)"; \
+	fi
+
+audit-rust: ## cargo-deny policy check for the Soroban workspace (advisories, licences, bans, sources)
+	@echo "▶ audit-rust"
+	@if command -v cargo-deny >/dev/null 2>&1; then \
+		cargo deny --manifest-path contracts/soroban/Cargo.toml --config deny.toml check advisories licenses bans sources; \
+	else \
+		echo "⏭ skipping audit-rust — cargo-deny not installed (install: cargo install cargo-deny --locked)"; \
+	fi
 
 audit-evm: ## Slither + forge build for EVM (full static analysis pass)
 	@echo "▶ audit-evm"

@@ -3,5 +3,6 @@
   "solc_remaps": ["forge-std/=lib/forge-std/src/"],
   "exclude_informational": true,
   "exclude_low": false,
-  "triage_database": "slither.db.json"
+  "triage_database": "slither.db.json",
+  "detectors_to_exclude": "naming-convention,solc-version,pragma,low-level-calls,dead-code,similar-names,assembly"
 }
