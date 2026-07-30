@@ -16,14 +16,14 @@ env:
   FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
 jobs:
-  # ── TypeScript (sdk / solver / relayer) ─────────────────────────────────────
+  # ── TypeScript (sdk / solver / relayer / mempool) ───────────────────────────
   ts-coverage:
     name: TypeScript Coverage (${{ matrix.package }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package: [sdk, solver, relayer]
+        package: [sdk, solver, relayer, mempool]
     steps:
       - uses: actions/checkout@v4
 

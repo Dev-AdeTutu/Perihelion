@@ -45,6 +45,11 @@ flags:
       - relayer/
     carryforward: true
 
+  ts-mempool:
+    paths:
+      - mempool/
+    carryforward: true
+
   soroban:
     paths:
       - contracts/soroban/
@@ -66,6 +71,10 @@ comment:
 # ── Paths to exclude from coverage ───────────────────────────────────────────
 # Test files, generated artifacts, and scripts do not need coverage themselves.
 ignore:
+  # test/ is the end-to-end workspace: it drives the other packages rather than
+  # shipping code of its own, so its own lines are not a coverage target.
+  - "test/**"
+  - "*/test/**"
   - "contracts/evm/test/**"
   - "contracts/soroban/settlement/src/test.rs"
   - "contracts/soroban/settlement/src/fuzz.rs"

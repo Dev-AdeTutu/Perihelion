@@ -7,10 +7,21 @@ coverage reports locally, and how the CI pipeline surfaces them on PRs.
 
 ## Quick start — local coverage
 
-### TypeScript (sdk, solver, relayer)
+### TypeScript (sdk, solver, relayer, mempool)
 
-All three TypeScript packages use [c8](https://github.com/bcoe/c8) to collect
+All four TypeScript packages use [c8](https://github.com/bcoe/c8) to collect
 V8 native coverage and produce an lcov report alongside a text summary.
+
+Coverage is measured against `src/`, never `dist/`. Tests run through `tsx`, and
+each package's `test:coverage` passes `--all --src src --include 'src/**'
+--exclude 'dist/**'` so that:
+
+- files with no tests at all still count against the denominator (`--all`),
+  which is what makes the ratchet meaningful, and
+- compiled output pulled in by a cross-package import (for example the solver
+  importing `@perihelion/sdk`, which resolves to `sdk/dist`) is not instrumented.
+  Instrumenting transpiled output was producing `funcs %` of `0.00` for modules
+  whose functions are plainly exercised.
 
 ```bash
 # Root — runs coverage for all workspaces and prints a combined text summary
@@ -20,6 +31,7 @@ npm run test:coverage
 npm run test:coverage --workspace=sdk
 npm run test:coverage --workspace=solver
 npm run test:coverage --workspace=relayer
+npm run test:coverage --workspace=mempool
 ```
 
 Reports are written to `<package>/coverage/lcov.info`. To browse the HTML
@@ -104,9 +116,9 @@ open coverage-html/index.html
 The `.github/workflows/coverage.yml` workflow runs on every push to `main` and
 on every PR. It:
 
-1. Runs each toolchain's coverage in parallel (three separate jobs):
-   - `ts-coverage (sdk)`, `ts-coverage (solver)`, `ts-coverage (relayer)` —
-     using `c8` + Node.js built-in test runner.
+1. Runs each toolchain's coverage in parallel (six separate jobs):
+   - `ts-coverage (sdk)`, `ts-coverage (solver)`, `ts-coverage (relayer)`,
+     `ts-coverage (mempool)` — using `c8` + Node.js built-in test runner.
    - `soroban-coverage` — using `cargo-llvm-cov`.
    - `evm-coverage` — using `forge coverage`.
 2. Uploads each lcov report to Codecov with a dedicated per-package flag:
@@ -116,14 +128,25 @@ on every PR. It:
    | `ts-sdk` | `@perihelion/sdk` | `sdk/` |
    | `ts-solver` | `@perihelion/solver` | `solver/` |
    | `ts-relayer` | `@perihelion/relayer` | `relayer/` |
+   | `ts-mempool` | `@perihelion/mempool` | `mempool/` |
+   | `ts-mempool` | `@perihelion/mempool` | `mempool/` |
    | `soroban` | Soroban settlement contract | `contracts/soroban/` |
    | `evm` | EVM escrow + timelock | `contracts/evm/` |
+
+   Every TypeScript workspace that ships code has a flag. The `test/`
+   workspace is the end-to-end suite: it drives the other packages instead of
+   shipping code of its own, so it is listed under `ignore` in `.codecov.yml`
+   rather than given a flag.
 
 3. Posts a PR comment showing:
    - **Reach** — overall coverage percentage after the PR.
    - **Diff** — coverage of lines added/changed in the PR (patch coverage).
    - **Flags** — per-package breakdown.
    - **Tree** — file-level coverage heatmap.
+
+Every TypeScript workspace that ships code under `src/` has a flag. The `test/`
+workspace is excluded in `.codecov.yml`: it is the end-to-end harness that
+drives the other packages, so its own lines are not a coverage target.
 
 ### Required secret
 
@@ -143,6 +166,11 @@ Thresholds are configured in `.codecov.yml`:
 | ----- | ------ | --------- | --------- |
 | **Project** | `auto` (ratchet) | 1% | Coverage can never drop below the current main-branch baseline. Any PR that lowers total coverage by more than 1% fails the `codecov/project` status check. |
 | **Patch** | 70% | 5% | New lines introduced on a PR must be ≥ 70% covered. A PR that adds code without tests fails the `codecov/patch` check. |
+
+`target: auto` is a stopgap. It was chosen while the reported numbers were
+untrustworthy (see the note on `dist/` above) and while `mempool` was outside the
+matrix, which meant the ratchet was computed over an incomplete denominator. Both
+are now fixed, so the next step is to replace `auto` with an explicit floor.
 
 ### Raising a threshold
 
