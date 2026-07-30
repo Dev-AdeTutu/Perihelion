@@ -72,6 +72,31 @@ make coverage          # Code coverage report
 
 **Minimum coverage threshold**: 85% line coverage on critical paths.
 
+### Slither Configuration
+
+CI runs Slither with `--fail-high`, so any high-severity finding blocks the merge. The reviewed
+baseline in `contracts/evm/slither.db.json` is applied via `--triage-database`, and
+`scripts/check-slither-triage.mjs` fails the job if any triaged entry lacks a written
+justification. Findings are also emitted as SARIF and uploaded to GitHub code scanning so they
+appear as annotations on the PR diff.
+
+Excluded detectors (`detectors_to_exclude` in `contracts/evm/slither.config.json`) and the reason
+for each:
+
+| Detector | Why excluded |
+|---|---|
+| `naming-convention` | Style only. `forge fmt --check` and review own naming. |
+| `solc-version` | The solc version is pinned in `foundry.toml`; the pin is the policy. |
+| `pragma` | Single pragma across the tree; a mismatch would fail the build first. |
+| `low-level-calls` | Used deliberately for token transfer compatibility, reviewed case by case. |
+| `dead-code` | Fires on inherited library/interface members that are part of the public API. |
+| `similar-names` | Style only, and noisy on `intentId` / `intentIdx` style pairs. |
+| `assembly` | Assembly use is limited, reviewed, and covered by unit and fuzz tests. |
+
+Informational findings are suppressed (`exclude_informational`); low-severity findings are
+reported. No medium or high detector is excluded. Adding an exclusion requires a rationale in
+this table in the same PR.
+
 ## Findings Tracking and Remediation Process
 
 ### 1. Findings Intake

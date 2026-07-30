@@ -50,6 +50,9 @@ jobs:
   slither:
     name: Slither (static analysis)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     defaults:
       run:
         working-directory: contracts/evm
@@ -78,15 +81,38 @@ jobs:
       - name: Install Slither
         run: pip install slither-analyzer
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Audit triage database justifications
+        working-directory: .
+        run: node scripts/check-slither-triage.mjs contracts/evm/slither.db.json
+
       - name: Analyze
-        run: slither src/ --config-file slither.config.json --json slither-report.json
+        run: |
+          slither src/ \
+            --config-file slither.config.json \
+            --triage-database slither.db.json \
+            --fail-high \
+            --sarif slither.sarif \
+            --json slither-report.json
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: contracts/evm/slither.sarif
 
       - name: Upload Slither report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: slither-report
-          path: contracts/evm/slither-report.json
+          path: |
+            contracts/evm/slither-report.json
+            contracts/evm/slither.sarif
           if-no-files-found: ignore
 
   natspec:
