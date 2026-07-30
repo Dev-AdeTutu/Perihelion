@@ -63,6 +63,28 @@ require **all three** toolchains and fail fast with a clear error if any are
 missing — use these if you want a genuinely all-stacks build/test that never
 silently skips anything.
 
+### Supported toolchain versions
+
+Every CI job builds with these exact versions and asserts it before doing any
+work (`scripts/check-toolchain.sh`). Use the same ones locally, or expect
+results that differ from CI for reasons unrelated to your change.
+
+| Toolchain | Version                                            | Pinned in                                        |
+| --------- | -------------------------------------------------- | ------------------------------------------------ |
+| Rust      | `1.81.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
+| Foundry   | `nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266` | `FOUNDRY_VERSION` in each Foundry workflow        |
+| Node.js   | see [.nvmrc](./.nvmrc)                             | [.nvmrc](./.nvmrc)                                |
+
+Each version has exactly one source of truth. Rust jobs read the channel out of
+`rust-toolchain.toml` instead of repeating it, so bumping that file bumps CI.
+Bumping Foundry means changing `FOUNDRY_VERSION` in the workflows that set it
+(`evm.yml`, `coverage.yml`, `differential-fuzz.yml`, `mutation-testing.yml`) and
+this table. Verify locally with:
+
+```bash
+./scripts/check-toolchain.sh all
+```
+
 ## Pre-commit hooks (optional but recommended)
 
 Perihelion uses [Lefthook](https://github.com/evilmartians/lefthook) to run the same
@@ -160,6 +182,75 @@ SKIP=cargo-clippy,forge-fmt git commit -m "wip"
   - This monorepo does not yet use per-package independent versioning or
     changeset/release-please automation — all packages move together until
     a package reaches 1.0 and needs its own release cadence.
+
+### Keeping the Implementation Status table honest
+
+The README's [Implementation Status](./README.md#implementation-status) table is
+what a reader (and a security reviewer) uses to decide what is real. A PR that
+changes whether a component is a stub, partially implemented, or complete must
+update the corresponding row in the same PR.
+
+Two rules the table has to keep:
+
+- Every row describes the code at `HEAD`, in both directions. Overstating a stub
+  misleads users; understating a real implementation means reviewers skip code
+  that is live.
+- Rows link only to **open** issues. If a closed issue is still the best
+  reference, annotate it: `#5 (closed, superseded by #328)`. The
+  `status-table-links` job in `.github/workflows/docs.yml` fails on an
+  unannotated closed link.
+
+Check it locally with:
+
+```bash
+node scripts/check-status-links.mjs
+```
+
+## Definition of Done
+
+An issue is closed when the behaviour it describes is in the code and enforced,
+not when an artefact related to it exists. A config file, a snapshot, or a
+baseline JSON that no job reads is worse than nothing: it reads as a guarantee
+and provides none.
+
+Before closing an issue, all three must hold:
+
+1. **Implemented.** The described behaviour is in the code at `HEAD`, not in a
+   placeholder, a `TODO`, or a method that throws `not implemented`.
+2. **Asserted.** A test fails if the behaviour regresses.
+3. **Gating, for CI and tooling issues.** The check fails on a deliberately
+   broken input, and that negative case runs in CI. Adding a config file or a
+   baseline is not enough; a job has to read it and fail.
+
+The closing PR states which of the three it satisfies, and closes the issue with
+`Closes #N` in its description rather than the issue being closed by hand. That
+keeps a diff attached to every closure, so a later reader can check the claim
+instead of trusting it.
+
+### Negative tests for CI gates
+
+Every gating check gets a companion case proving it gates, checked in next to
+the check itself:
+
+| Gate | Proof it gates |
+| ---- | -------------- |
+| `scripts/check-status-links.mjs` | `.github/fixtures/status-table-closed-issue.md` links a closed issue; the `status-table-links` job asserts the checker exits non-zero on it. |
+| `scripts/check-toolchain.sh` | Fails when `rustc` or `forge` is not the pinned version; every Rust and Foundry job runs it before building. |
+
+When you add a gate, add its negative case in the same PR. A gate that has never
+been observed to fail is an assumption, not a guarantee.
+
+### Tracking gaps that are already in the code
+
+`.github/workflows/stub-audit.yml` runs weekly and lists every `TODO`,
+`Placeholder`, `not implemented`, and `stub` marker under the source directories
+in its job summary. Treat that list as the authoritative gap list: it is derived
+from the code, so closing an issue cannot hide an entry. Run the same scan
+locally with:
+
+```bash
+grep -rInE 'TODO|FIXME|[Pp]laceholder|[Nn]ot implemented|\bstubs?\b' sdk/src solver/src relayer/src mempool/src
+```
 
 ## Merge criteria
 

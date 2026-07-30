@@ -26,12 +26,20 @@ jobs:
         working-directory: .
         run: ./scripts/check-spdx-headers.sh
 
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        working-directory: .
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.81.0
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
+
+      - name: Verify toolchain in effect
+        run: ../../scripts/check-toolchain.sh rust
 
       - name: Cache cargo
         uses: actions/cache@v4

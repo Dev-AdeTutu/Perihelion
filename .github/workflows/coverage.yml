@@ -11,15 +11,19 @@ concurrency:
   group: coverage-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
+  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
+
 jobs:
-  # ── TypeScript (sdk / solver / relayer) ─────────────────────────────────────
+  # ── TypeScript (sdk / solver / relayer / mempool) ───────────────────────────
   ts-coverage:
     name: TypeScript Coverage (${{ matrix.package }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package: [sdk, solver, relayer]
+        package: [sdk, solver, relayer, mempool]
     steps:
       - uses: actions/checkout@v4
 
@@ -59,12 +63,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The toolchain version comes from rust-toolchain.toml, so coverage is
+      # measured with the same compiler that gates the tests.
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        working-directory: .
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: wasm32-unknown-unknown
           # llvm-tools-preview is required by cargo-llvm-cov
           components: llvm-tools-preview
+
+      - name: Verify toolchain in effect
+        run: ../../scripts/check-toolchain.sh rust
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -73,7 +88,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/soroban/target
-          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('contracts/soroban/**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/soroban/**/Cargo.toml', 'rust-toolchain.toml') }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -109,6 +124,11 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
+
+      - name: Verify toolchain in effect
+        run: ../../scripts/check-toolchain.sh foundry
 
       - name: Install forge-std
         run: forge install foundry-rs/forge-std --no-git

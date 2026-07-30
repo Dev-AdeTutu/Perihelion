@@ -25,11 +25,14 @@
   "publishConfig": {
     "access": "public"
   },
-  "files": ["dist", "LICENSE"],
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test --import tsx test/*.test.ts",
-    "test:coverage": "c8 --reporter=lcov --reporter=text --report-dir=coverage node --test --import tsx test/*.test.ts",
+    "test:coverage": "c8 --all --src src --include 'src/**' --exclude 'dist/**' --exclude 'test/**' --reporter=lcov --reporter=text --report-dir=coverage node --test --import tsx test/*.test.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
