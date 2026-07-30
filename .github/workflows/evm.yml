@@ -16,6 +16,9 @@ jobs:
   evm:
     name: EVM (Solidity)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     defaults:
       run:
         working-directory: contracts/evm
@@ -46,6 +49,30 @@ jobs:
       - name: Tests
         working-directory: .
         run: make test-evm
+
+      - name: Gas snapshot check
+        run: forge snapshot --check --tolerance 1
+
+      # The gas diff is what reviewers actually read; the pass/fail above only
+      # says "something moved", not by how much or where.
+      - name: Generate gas report
+        if: github.event_name == 'pull_request'
+        run: forge test --gas-report --json > gas-report.json
+
+      - name: Compare gas reports
+        if: github.event_name == 'pull_request'
+        id: gas_diff
+        uses: Rubilmax/foundry-gas-diff@v3
+        with:
+          report: contracts/evm/gas-report.json
+          ignore: test/**/*
+
+      - name: Comment gas diff on PR
+        if: github.event_name == 'pull_request' && steps.gas_diff.outputs.markdown != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: evm-gas-diff
+          message: ${{ steps.gas_diff.outputs.markdown }}
 
   slither:
     name: Slither (static analysis)
