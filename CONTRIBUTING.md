@@ -63,6 +63,28 @@ require **all three** toolchains and fail fast with a clear error if any are
 missing — use these if you want a genuinely all-stacks build/test that never
 silently skips anything.
 
+### Supported toolchain versions
+
+Every CI job builds with these exact versions and asserts it before doing any
+work (`scripts/check-toolchain.sh`). Use the same ones locally, or expect
+results that differ from CI for reasons unrelated to your change.
+
+| Toolchain | Version                                            | Pinned in                                        |
+| --------- | -------------------------------------------------- | ------------------------------------------------ |
+| Rust      | `1.81.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
+| Foundry   | `nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266` | `FOUNDRY_VERSION` in each Foundry workflow        |
+| Node.js   | see [.nvmrc](./.nvmrc)                             | [.nvmrc](./.nvmrc)                                |
+
+Each version has exactly one source of truth. Rust jobs read the channel out of
+`rust-toolchain.toml` instead of repeating it, so bumping that file bumps CI.
+Bumping Foundry means changing `FOUNDRY_VERSION` in the workflows that set it
+(`evm.yml`, `coverage.yml`, `differential-fuzz.yml`, `mutation-testing.yml`) and
+this table. Verify locally with:
+
+```bash
+./scripts/check-toolchain.sh all
+```
+
 ## Pre-commit hooks (optional but recommended)
 
 Perihelion uses [Lefthook](https://github.com/evilmartians/lefthook) to run the same
