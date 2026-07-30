@@ -22,6 +22,7 @@
         coverage coverage-ts coverage-evm      \
         gas                                    \
         audit audit-ts audit-evm               \
+        bytecode-check                         \
         clean                                  \
         fuzz fuzz-bounded fuzz-extended fuzz-nightly \
         fuzz-evm fuzz-rust fuzz-cross          \
@@ -235,6 +236,14 @@ audit: audit-ts audit-evm ## Run all security audit helpers
 audit-ts: ## npm audit for TypeScript packages
 	@echo "▶ audit-ts"
 	npm audit
+
+bytecode-check: ## Verify the EVM build matches contracts/evm/.pinned-bytecode/ (pass ARGS=--update to re-pin)
+	@echo "▶ bytecode-check"
+	@if command -v forge >/dev/null 2>&1; then \
+		./scripts/check-pinned-bytecode.sh $(ARGS); \
+	else \
+		echo "⏭ skipping bytecode-check — forge not installed (install: https://getfoundry.sh)"; \
+	fi
 
 audit-evm: ## Slither + forge build for EVM (full static analysis pass)
 	@echo "▶ audit-evm"

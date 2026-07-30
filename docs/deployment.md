@@ -55,7 +55,7 @@ Build and test first:
 >
 > The EVM contracts use a pinned compiler version and settings that make
 > deployments verifiable on block explorers. The CI workflow
-> (`.github/workflows/reproducible-bytecode.yml`) enforces that the bytecode
+> (`.github/workflows/evm.yml`, the `bytecode` job) enforces that the bytecode
 > produced by the current source exactly matches pinned hashes on every PR.
 >
 > **Compiler settings for explorer verification:**
@@ -66,7 +66,7 @@ Build and test first:
 > | EVM version      | `cancun`   |
 > | Optimizer        | enabled    |
 > | Optimizer runs   | `200`      |
-> | Metadata hash    | appended (default) — explorers detect this automatically; append mode is the Solidity default and is standard for verified contracts |
+> | Metadata hash    | `none` (`bytecode_hash = "none"`, `cbor_metadata = false`) — metadata embeds the source path and compiler build, which breaks byte-for-byte comparison across machines; select "no metadata" on the explorer form |
 >
 > These are defined in [`contracts/evm/foundry.toml`](../contracts/evm/foundry.toml).
 > The pinned bytecode hashes live in `contracts/evm/.pinned-bytecode/` and are
@@ -74,17 +74,23 @@ Build and test first:
 > same bytecode as the CI-pinned hashes by running:
 >
 > ```bash
-> cd contracts/evm
-> forge build
-> for contract in PerihelionEscrow PerihelionTimelock; do
->   echo "$contract creation: $(jq -r '.bytecode.object' "out/$contract.sol/$contract.json" | sha256sum)"
->   echo "$contract runtime:  $(jq -r '.deployedBytecode.object' "out/$contract.sol/$contract.json" | sha256sum)"
-> done
+> make bytecode-check     # or: ./scripts/check-pinned-bytecode.sh
 > ```
 >
-> If the hashes differ from the `.pinned-bytecode/` entries, the source or
-> compiler settings have changed and the explorer verification input must be
-> updated accordingly (see the CI workflow for the canonical hashes).
+> This is a required pre-deployment step: it must pass on the exact commit being
+> deployed. If the hashes differ from the `.pinned-bytecode/` entries, the source
+> or compiler settings have changed and the pins are stale.
+>
+> **Intentional pin updates.** A PR that changes contract bytecode must update the
+> pins in the same commit:
+>
+> ```bash
+> ./scripts/check-pinned-bytecode.sh --update
+> ```
+>
+> The PR description must state why the bytecode changed. Reviewers treat a pin
+> change with no corresponding source change, or a source change with no pin
+> update, as a blocker.
 >
 > Once deployed, verify the on-chain bytecode against the build artifact using
 > the block explorer's "Verify & Publish" form with the exact settings above.
@@ -193,6 +199,7 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 - [ ] Soroban `is_paused() == false`, peer registered for the EVM EID
 - [ ] LayerZero DVN set and libraries configured both directions
 - [ ] One small end-to-end test transfer settles, and a deliberately-expired one refunds
+- [ ] `make bytecode-check` passes on the exact commit being deployed
 
 ---
 
