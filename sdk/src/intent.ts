@@ -286,6 +286,12 @@ export interface BuildOptions {
  * nonce when not provided. Validates all caller-supplied fields and throws
  * {@link IntentValidationError} if any are malformed. Emits a non-fatal warning
  * if the intent's source amount is below the economical threshold (V_min).
+ *
+ * **Note on `preferredSolver`:** This field controls solver reservation on the source
+ * (EVM) chain only. When an intent bridges to Stellar, the preferred solver is not
+ * reserved on Stellar — the Soroban settlement contract cannot represent an EVM address
+ * as a Stellar address, so any `preferredSolver` value is silently dropped. Cross-chain
+ * reservation is tracked as a follow-up to issue #271.
  */
 export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {
   validateIntent(params);

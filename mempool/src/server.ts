@@ -16,27 +16,13 @@ const RATE_LIMIT_MAX_REQUESTS = 60;
 const HASH_RE = /^0x[0-9a-f]{64}$/;
 
 /**
- * Canonical status vocabulary, shared with the SDK's {@link IntentStatus}
- * (docs/api/mempool-api.yaml documents the same six values). Validating
- * against this set — rather than trusting the query string — means a
- * typo'd or repeated `status` filter fails loudly instead of silently
- * matching nothing.
+ * The set of statuses the mempool assigns.
+ * Derived from {@link MempoolIntentStatus} (mempool/src/types.ts) and the SDK.
+ * Validating against this set — rather than trusting the query string —
+ * means a typo'd or repeated `status` filter fails loudly instead of
+ * silently matching nothing.
  */
 const INTENT_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "claimed",
-  "settling",
-  "settled",
-  "refunded",
-  "expired",
-]);
-
-/**
- * Statuses the mempool itself may be moved into via PATCH /intents/:hash/status.
- * Narrower than {@link INTENT_STATUSES}: `claimed`/`settling` are derived from
- * chain state, not reported by the relayer.
- */
-const VALID_STATUSES: ReadonlySet<IntentStatus> = new Set([
   "pending",
   "settled",
   "refunded",
@@ -117,8 +103,8 @@ export class MempoolServer {
     const { hash } = req.params as { hash: Hex };
     const { status } = req.body as { status?: IntentStatus };
 
-    if (!status || !VALID_STATUSES.has(status)) {
-      res.status(400).json({ error: `status must be one of ${[...VALID_STATUSES].join(", ")}` });
+    if (!status || !INTENT_STATUSES.has(status)) {
+      res.status(400).json({ error: `status must be one of ${[...INTENT_STATUSES].join(", ")}` });
       return;
     }
 
