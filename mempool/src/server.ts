@@ -22,7 +22,7 @@ const HASH_RE = /^0x[0-9a-f]{64}$/;
  * means a typo'd or repeated `status` filter fails loudly instead of
  * silently matching nothing.
  */
-const INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set([
+const INTENT_STATUSES: ReadonlySet<string> = new Set([
   "pending",
   "settled",
   "refunded",
