@@ -79,7 +79,17 @@ Each version has exactly one source of truth. Rust jobs read the channel out of
 `rust-toolchain.toml` instead of repeating it, so bumping that file bumps CI.
 Bumping Foundry means changing `FOUNDRY_VERSION` in the workflows that set it
 (`evm.yml`, `coverage.yml`, `differential-fuzz.yml`, `mutation-testing.yml`) and
-this table. Verify locally with:
+this table.
+
+**Foundry version pinning policy:** The nightly version is pinned to ensure all
+CI jobs use the same toolchain, so coverage, mutation testing, and bytecode
+builds are reproducible and not affected by toolchain regressions. To advance
+the version, pick a newer nightly from [foundry releases](https://github.com/foundry-rs/foundry/releases),
+update the `FOUNDRY_VERSION` env var in all four workflow files, verify
+locally that the build still passes, and include the pinned SHA in your PR
+description so reviewers can track the justification for the bump.
+
+Verify locally with:
 
 ```bash
 ./scripts/check-toolchain.sh all

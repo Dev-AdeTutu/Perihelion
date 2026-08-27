@@ -1,6 +1,10 @@
 name: Docs
 
 on:
+  schedule:
+    # Nightly external link check at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -159,7 +163,7 @@ jobs:
   markdown-links-external:
     name: Check external links (nightly)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event.schedule == '0 2 * * *'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 

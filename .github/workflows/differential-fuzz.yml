@@ -26,6 +26,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
+  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
   FOUNDRY_PROFILE: ci
 
 jobs:
@@ -39,8 +41,6 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: ${{ env.FOUNDRY_VERSION }}
-        with:
-          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
       - name: Cache Foundry build
         uses: actions/cache@v4
@@ -135,8 +135,6 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: ${{ env.FOUNDRY_VERSION }}
-        with:
-          version: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
 
       - name: Validate Rust-generated payloads with Solidity decoder
         working-directory: contracts/evm
