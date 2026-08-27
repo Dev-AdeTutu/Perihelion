@@ -3,7 +3,7 @@ version: '3.9'
 services:
   # EVM local testnet using Anvil
   anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
+    image: ghcr.io/foundry-rs/foundry:nightly-f625e95
     command: anvil --host 0.0.0.0 --port 8545
     ports:
       - "8545:8545"
@@ -14,7 +14,7 @@ services:
 
   # Stellar local testnet using Stellar Quickstart
   stellar:
-    image: stellar/quickstart:latest
+    image: stellar/quickstart:21.2.0
     environment:
       STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
       SOROBAN_RPC_HOST: "0.0.0.0"
