@@ -83,29 +83,6 @@ tags:
 
 paths:
 
-  /info:
-    get:
-      operationId: getInfo
-      tags: [Intents]
-      summary: Get the mempool's active EIP-712 domain
-      description: |
-        Returns the `chainId` and `verifyingContract` (escrow address) this
-        server verifies intent signatures against. Clients should confirm
-        agreement here before signing, since a mismatch produces a
-        signature-verification failure rather than an obvious config error.
-      responses:
-        '200':
-          description: The active EIP-712 domain.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  chainId:
-                    type: integer
-                  verifyingContract:
-                    type: string
-
   /intents:
 
     post:
