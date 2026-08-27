@@ -39,9 +39,5 @@ RUN addgroup -g 1001 -S nodejs && adduser -S node -u 1001
 
 USER node
 
-# Health check for Docker container orchestration
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8080/healthz', (r) => { if (r.statusCode === 200) process.exit(0); process.exit(1); })" || exit 1
-
 # Start the relayer or solver
 CMD ["node", "${PACKAGE}/dist/index.js"]

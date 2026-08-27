@@ -98,6 +98,9 @@ export class MempoolServer {
   private setupRoutes(): void {
     this.app.use(express.json({ limit: "8kb" }));
 
+    this.app.get("/healthz", (req: Request, res: Response) => {
+      res.status(200).json({ status: "ok" });
+    });
     this.app.get("/info", this.handleInfo.bind(this));
     this.app.post("/intents", this.rateLimit.bind(this), this.handleSubmitIntent.bind(this));
     this.app.get("/intents/:hash", this.handleGetIntent.bind(this));
