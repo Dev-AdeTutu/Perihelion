@@ -42,7 +42,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       - name: Lint docs/api/mempool-api.yaml with Spectral
         run: npx --yes @stoplight/spectral-cli lint docs/api/mempool-api.yaml
@@ -112,7 +112,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       # Needs the API to resolve issue state, so it runs with the default token.
       - name: Check the table links no closed issues
@@ -141,7 +141,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check@3
@@ -170,7 +170,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: '.nvmrc'
 
       - name: Install markdown-link-check
         run: npm install -g markdown-link-check@3
