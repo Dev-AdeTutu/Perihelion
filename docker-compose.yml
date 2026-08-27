@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   # EVM local testnet using Anvil
   anvil:
