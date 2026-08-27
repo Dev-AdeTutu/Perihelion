@@ -161,8 +161,8 @@ test("GET /intents?status=<repeated> returns 400 instead of silently comparing a
 test("GET /intents?status=pending returns only matching records", async () => {
   const res = await fetch(`${BASE}/intents?status=pending`);
   assert.equal(res.status, 200);
-  const body = (await res.json()) as Array<{ status: string }>;
-  assert.ok(body.every((r) => r.status === "pending"));
+  const body = (await res.json()) as { records: Array<{ status: string }>; nextCursor?: string };
+  assert.ok(body.records.every((r) => r.status === "pending"));
 });
 
 // ─── Issue 320: duplicate and expired submissions ──────────────────────────
