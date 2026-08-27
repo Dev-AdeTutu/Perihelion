@@ -10,7 +10,7 @@ on:
 
 env:
   # Single source of truth for the Foundry version; see CONTRIBUTING.md.
-  FOUNDRY_VERSION: nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266
+  FOUNDRY_VERSION: stable
 
 concurrency:
   group: evm-${{ github.ref }}
