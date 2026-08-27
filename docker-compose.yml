@@ -44,14 +44,15 @@ services:
       - stellar
     environment:
       NODE_ENV: development
+      PORT: "3000"
       PERIHELION_EVM_RPC_URL: http://anvil:8545
       PERIHELION_SOROBAN_RPC_URL: http://stellar:8000
     ports:
-      - "8080:8080"
+      - "3000:3000"
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/info"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -114,7 +115,7 @@ services:
     environment:
       NODE_ENV: development
       # Mempool configuration
-      PERIHELION_MEMPOOL_URL: http://mempool:8080
+      PERIHELION_MEMPOOL_URL: http://mempool:3000
       # Solver identification
       PERIHELION_SOLVER_ADDRESS: "0x0000000000000000000000000000000000000000"
       # Chain configuration

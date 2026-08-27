@@ -92,6 +92,11 @@ export class MempoolServer {
     this.verifyingContract = opts.verifyingContract;
     this.domain = perihelionDomain(this.chainId, this.verifyingContract);
     this.statusToken = opts.statusToken;
+    if (this.host !== "localhost" && this.host !== "127.0.0.1") {
+      console.warn(
+        `PERIHELION_MEMPOOL_HOST is set to ${this.host} — this endpoint has no write authentication and should not be exposed publicly.`,
+      );
+    }
     this.setupRoutes();
   }
 
