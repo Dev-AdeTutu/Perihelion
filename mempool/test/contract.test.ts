@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 /**
  * Contract test for `docs/api/mempool-api.yaml`.
  *
