@@ -17,6 +17,10 @@ on:
         default: false
 
 # Cancel in-progress runs on the same branch/PR.
+env:
+  # Keep in step with .github/workflows/evm.yml and CONTRIBUTING.md.
+  FOUNDRY_VERSION: stable
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

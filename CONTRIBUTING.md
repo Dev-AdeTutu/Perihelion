@@ -71,8 +71,8 @@ results that differ from CI for reasons unrelated to your change.
 
 | Toolchain | Version                                            | Pinned in                                        |
 | --------- | -------------------------------------------------- | ------------------------------------------------ |
-| Rust      | `1.81.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
-| Foundry   | `nightly-f3f12cf3ccfae5c4db8ac622c165198125a83266` | `FOUNDRY_VERSION` in each Foundry workflow        |
+| Rust      | `1.85.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
+| Foundry   | `stable`                                           | `FOUNDRY_VERSION` in each Foundry workflow        |
 | Node.js   | see [.nvmrc](./.nvmrc)                             | [.nvmrc](./.nvmrc)                                |
 
 Each version has exactly one source of truth. Rust jobs read the channel out of
