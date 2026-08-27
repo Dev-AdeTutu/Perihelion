@@ -44,14 +44,15 @@ services:
       - stellar
     environment:
       NODE_ENV: development
-      PERIHELION_EVM_RPC_URL: http://anvil:8545
-      PERIHELION_SOROBAN_RPC_URL: http://stellar:8000
+      PORT: 3000
+      PERIHELION_SOURCE_CHAIN_ID: 31337
+      PERIHELION_ESCROW_ADDRESS: "0x0000000000000000000000000000000000000000"
     ports:
-      - "8080:8080"
+      - "3000:3000"
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -74,10 +75,10 @@ services:
     environment:
       NODE_ENV: development
       # EVM configuration
-      EVM_RPC_URL: http://anvil:8545
+      PERIHELION_EVM_RPC_URL: http://anvil:8545
       PERIHELION_SOURCE_EID: 30101
       # Stellar configuration
-      SOROBAN_RPC_URL: http://stellar:8000
+      PERIHELION_STELLAR_RPC_URL: http://stellar:8000
       STELLAR_NETWORK: "Test SDF Network ; September 2015"
       PERIHELION_STELLAR_EID: 40161
       # Relayer configuration
@@ -96,6 +97,12 @@ services:
       - perihelion
     volumes:
       - relayer-checkpoint:/tmp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # Perihelion solver
   solver:
@@ -114,7 +121,7 @@ services:
     environment:
       NODE_ENV: development
       # Mempool configuration
-      PERIHELION_MEMPOOL_URL: http://mempool:8080
+      PERIHELION_MEMPOOL_URL: http://mempool:3000
       # Solver identification
       PERIHELION_SOLVER_ADDRESS: "0x0000000000000000000000000000000000000000"
       # Chain configuration
@@ -140,6 +147,12 @@ services:
       - "9090:9090"
     networks:
       - perihelion
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 networks:
   perihelion:
